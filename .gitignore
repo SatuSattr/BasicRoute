@@ -1,0 +1,12 @@
+# secrets & local config (jangan di-commit)
+.env
+config.jsonc
+
+# build output
+basicroute
+basicroute.exe
+*.exe
+*.test
+
+# Go
+/vendor/
