@@ -2,6 +2,10 @@
 
 Lightweight AI proxy with a single OpenAI-compatible endpoint (`/v1/*`) multi-key fallback, proxy pools, and reload without restart. Built for my own use case as a replacement for 9router or OmniRoute.
 
+> **Warning:** this project is still in very early development. Things may break, configs may change, and features may be missing.
+
+> Don't expect a Web dashboard or CLI cs this is a minimal API-only gateway.
+
 ## Running
 
 ```bash
