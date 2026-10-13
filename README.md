@@ -4,6 +4,12 @@ Minimal AI proxy with a single OpenAI-compatible endpoint (`/v1/*`) multi-key fa
 
 > **Warning:** this project is still in very early development. Things may break, configs may change, and features may be missing.
 
+## Preview
+
+| Home menu | Provider cards | Proxy cards |
+| --------- | -------------- | ----------- |
+| <img src="preview/home.png" width="300" alt="Home menu"> | <img src="preview/provider.png" width="300" alt="Provider cards"> | <img src="preview/proxy.png" width="300" alt="Proxy cards"> |
+
 ## Running
 
 ```bash
@@ -105,19 +111,7 @@ Press `r` in the TUI, type `r` + Enter in pipe mode, or send SIGHUP (Linux). Inv
 
 ## TUI (read-only)
 
-When stdin is an interactive terminal, BasicRoute opens a fullscreen TUI (gray/black/white, no CRUD — it never mutates config). Keys and proxy passwords are always masked (`****` + last 4 chars).
-
-```text
-BasicRoute v1.0
-http://0.0.0.0:21172
-Providers: 2 / 2   |   Models: 4 / 4   |   Proxies: 1 / 1
-
-Menus
- ● Api Key
- ● Logs
- ● Provider
- ● Proxy
-```
+When stdin is an interactive terminal, BasicRoute opens a fullscreen TUI (gray/black/white, no CRUD — it never mutates config). Keys and proxy passwords are always masked (`****` + last 4 chars). Screenshots: see [Preview](#preview).
 
 | Key              | Action                                                             |
 | ---------------- | ------------------------------------------------------------------ |
