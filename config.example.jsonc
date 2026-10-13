@@ -86,10 +86,6 @@
     },
   },
   "proxyPools": {
-    // type "http"  = standard forward proxy (711Proxy/9Proxy/etc):
-    //               http://user:password@host:port
-    // type "relay" = 9router-style http relay (self-hosted on Vercel/CF/Deno):
-    //               https://your-relay.vercel.app (no user:password@)
     "pool-eu": {
       "type": "http",
       "url": "http://customer123:your_password@proxy.example.com:8080",
