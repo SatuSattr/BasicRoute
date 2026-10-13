@@ -60,6 +60,11 @@ func main() {
 	}
 
 	st := service.NewStore(snap)
+	st.Usage = service.NewUsageTracker(snap.Raw.System.UsageFile)
+	st.Usage.Load()
+	usageStop := make(chan struct{})
+	go st.Usage.AutoFlush(service.FlushInterval, usageStop)
+	defer close(usageStop)
 	pool := service.NewPool()
 	srv := server.New(st, pool, log, int(snap.Raw.System.Limits.MaxBodyMB))
 	handler := srv.Handler()
@@ -85,6 +90,14 @@ func main() {
 		st.SetDraining(true)
 		log.Info("reload draining", "inFlight", st.InFlight())
 		st.WaitIdle(drainTimeout)
+		// Flush usage sebelum ganti snapshot; bila path berubah, pindah tracker.
+		if st.Usage != nil {
+			_ = st.Usage.Flush()
+			if staged.Raw.System.UsageFile != "" && staged.Raw.System.UsageFile != st.Usage.Path() {
+				st.Usage = service.NewUsageTracker(staged.Raw.System.UsageFile)
+				st.Usage.Load()
+			}
+		}
 		st.Swap(staged)
 		st.SetDraining(false)
 		log.Info("reload ok", "gen", st.Gen())
@@ -97,6 +110,11 @@ func main() {
 			log.Info("shutdown requested, draining", "reason", reason, "inFlight", st.InFlight())
 			st.SetDraining(true)
 			st.WaitIdle(drainTimeout)
+			if st.Usage != nil {
+				if err := st.Usage.Flush(); err != nil {
+					log.Warn("usage flush failed", "err", err.Error())
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer cancel()
 			if err := httpSrv.Shutdown(ctx); err != nil {

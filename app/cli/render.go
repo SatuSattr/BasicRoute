@@ -18,6 +18,47 @@ func MaskProxyURL(s string) string { return maskProxyURL(s) }
 // MaskKey menyamarkan satu API key (diekspor untuk TUI).
 func MaskKey(k string) string { return maskKey(k) }
 
+// FormatTokens memformat angka penuh gaya US: 1000000 -> "1,000,000".
+func FormatTokens(n uint64) string {
+	if n < 1000 {
+		return itoa64(n)
+	}
+	var digits []byte
+	if n == 0 {
+		return "0"
+	}
+	for n > 0 {
+		digits = append(digits, byte('0'+n%10))
+		n /= 10
+	}
+	// reverse
+	for i, j := 0, len(digits)-1; i < j; i, j = i+1, j-1 {
+		digits[i], digits[j] = digits[j], digits[i]
+	}
+	out := make([]byte, 0, len(digits)+len(digits)/3)
+	for i, d := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, d)
+	}
+	return string(out)
+}
+
+func itoa64(n uint64) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}
+
 // Summary adalah angka ringkas untuk header (TUI/status).
 type Summary struct {
 	Gen                 uint64

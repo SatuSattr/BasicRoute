@@ -2,7 +2,7 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Palet abu-abu / hitam / putih. Sengaja monokrom agar tenang di mata.
+// Palet abu-abu / hitam / putih, plus hijau/merah untuk indikator status.
 var (
 	colPaper = lipgloss.Color("#FEFEFE") // teks utama / judul
 	colText  = lipgloss.Color("#D6D6D6") // isi
@@ -10,7 +10,8 @@ var (
 	colFaint = lipgloss.Color("#585858") // versi, hint, pemisah
 	colLine  = lipgloss.Color("#2C2C2C") // border window
 	colSelBg = lipgloss.Color("#1F1F1F") // latar pilihan aktif
-	colGreen = lipgloss.Color("#4ADE80") // indikator enabled
+	colGreen = lipgloss.Color("#4ADE80") // indikator enabled / sehat
+	colRed   = lipgloss.Color("#F87171") // indikator error
 )
 
 var (
@@ -55,6 +56,8 @@ var (
 	styleCardURL    = lipgloss.NewStyle().Foreground(colDim)
 	styleDotOn      = lipgloss.NewStyle().Bold(true).Foreground(colGreen)
 	styleDotOff     = lipgloss.NewStyle().Foreground(colDim)
+	styleDotErr     = lipgloss.NewStyle().Bold(true).Foreground(colRed)
+	styleCardSel2   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colText).Padding(0, 1)
 
 	// Detail provider: judul nama, kepala seksi, label vs nilai, pemisah.
 	styleDetName = lipgloss.NewStyle().Bold(true).Foreground(colPaper)

@@ -18,11 +18,13 @@ type Config struct {
 }
 
 type System struct {
-	Host        string             `json:"host"`
-	Port        FlexInt            `json:"port"`
-	RequireAuth FlexBool           `json:"requireAuth"`
-	Keys        map[string]*SysKey `json:"keys"`
-	Limits      Limits             `json:"limits"`
+	Host         string             `json:"host"`
+	Port         FlexInt            `json:"port"`
+	RequireAuth  FlexBool           `json:"requireAuth"`
+	Keys         map[string]*SysKey `json:"keys"`
+	Limits       Limits             `json:"limits"`
+	UsageFile    string             `json:"usageFile,omitempty"`
+	ProxyTestURL string             `json:"proxyTestUrl,omitempty"`
 }
 
 type SysKey struct {
@@ -65,7 +67,14 @@ type Limit struct {
 	Output  FlexInt `json:"output"`
 }
 
+// Tipe proxy pool yang didukung.
+const (
+	ProxyTypeHTTP  = "http"  // forward proxy standard (mis. 711Proxy/9Proxy): http(s)://user:pass@host:port
+	ProxyTypeRelay = "relay" // http relay (mis. 9router): https://relay.example.com + header x-relay-*
+)
+
 type ProxyPool struct {
+	Type    string   `json:"type,omitempty"` // "" / "http" = forward proxy, "relay" = http relay
 	URL     string   `json:"url"`
 	Enabled FlexBool `json:"enabled"`
 }
@@ -260,6 +269,16 @@ func validateAndNormalize(cfg *Config) error {
 	if cfg.System.RequireAuth && enabledSysKeys == 0 {
 		return fmt.Errorf("system.keys: requireAuth=true needs >=1 enabled system key")
 	}
+	if strings.TrimSpace(cfg.System.UsageFile) == "" {
+		cfg.System.UsageFile = "/app/data/usage.json"
+	} else {
+		cfg.System.UsageFile = strings.TrimSpace(cfg.System.UsageFile)
+	}
+	if strings.TrimSpace(cfg.System.ProxyTestURL) == "" {
+		cfg.System.ProxyTestURL = "https://www.gstatic.com/generate_204"
+	} else {
+		cfg.System.ProxyTestURL = strings.TrimSpace(cfg.System.ProxyTestURL)
+	}
 
 	if cfg.ProxyPools == nil {
 		cfg.ProxyPools = map[string]*ProxyPool{}
@@ -267,6 +286,15 @@ func validateAndNormalize(cfg *Config) error {
 	for name, p := range cfg.ProxyPools {
 		if p == nil {
 			return fmt.Errorf("proxyPools[%q]: entry null", name)
+		}
+		p.Type = strings.ToLower(strings.TrimSpace(p.Type))
+		if p.Type == "" {
+			p.Type = ProxyTypeHTTP
+		}
+		switch p.Type {
+		case ProxyTypeHTTP, ProxyTypeRelay:
+		default:
+			return fmt.Errorf("proxyPools[%q].type: must be %q or %q, got %q", name, ProxyTypeHTTP, ProxyTypeRelay, p.Type)
 		}
 		u := strings.TrimSpace(p.URL)
 		if u == "" {
@@ -280,6 +308,9 @@ func validateAndNormalize(cfg *Config) error {
 		case "http", "https":
 		default:
 			return fmt.Errorf("proxyPools[%q].url: scheme must be http/https (socks5 not supported), got %q", name, parsed.Scheme)
+		}
+		if p.Type == ProxyTypeRelay && parsed.User != nil {
+			return fmt.Errorf("proxyPools[%q].url: type %q takes no user:password@ (use type %q for credentialed forward proxies)", name, ProxyTypeRelay, ProxyTypeHTTP)
 		}
 		p.URL = u
 	}

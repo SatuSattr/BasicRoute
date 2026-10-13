@@ -125,20 +125,25 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(tok)
 }
 
-func (s *Server) authorized(r *http.Request, snap *config.Snapshot) bool {
+func (s *Server) authorize(r *http.Request, snap *config.Snapshot) (name string, ok bool) {
 	if !snap.Raw.System.RequireAuth {
-		return true
+		return "", true
 	}
 	tok := bearerToken(r)
 	if tok == "" {
-		return false
+		return "", false
 	}
-	for _, k := range snap.Raw.System.Keys {
+	for n, k := range snap.Raw.System.Keys {
 		if k != nil && bool(k.Enabled) && subtle.ConstantTimeCompare([]byte(tok), []byte(k.Key)) == 1 {
-			return true
+			return n, true
 		}
 	}
-	return false
+	return "", false
+}
+
+func (s *Server) authorized(r *http.Request, snap *config.Snapshot) bool {
+	_, ok := s.authorize(r, snap)
+	return ok
 }
 
 func (s *Server) draining() bool {
@@ -261,10 +266,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		lg.Info("req<", "status", 503)
 		return
 	}
-	if !s.authorized(r, snap) {
+	callerName, okAuth := s.authorize(r, snap)
+	if !okAuth {
 		writeErr(w, http.StatusUnauthorized, "invalid bearer token", "invalid_request_error", "invalid_api_key")
 		lg.Info("req<", "status", 401)
 		return
+	}
+	callerHash := ""
+	if tok := bearerToken(r); tok != "" {
+		callerHash = service.HashSysKey(tok)
 	}
 	if !s.st.Begin() {
 		writeErr(w, http.StatusServiceUnavailable, "reloading, retry shortly", "server_busy", "")
@@ -324,13 +334,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	target := service.TargetURL(ref.Provider.BaseURL, ref.Provider.Interface)
 
-	proxyURL, err := resolveProxyURL(snap, ref.Provider)
+	proxyType, proxyURL, err := resolveProxy(snap, ref.Provider)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error(), "server_error", "bad_gateway")
 		lg.Warn("proxy resolve failed", "provider", ref.ProviderSlug, "proxy", ref.Provider.Proxy, "err", err.Error())
 		return
 	}
-	client, err := s.pool.ClientFor(proxyURL)
+	client, err := s.pool.ClientFor(proxyType, proxyURL)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("proxy %q: %v", ref.Provider.Proxy, err), "server_error", "bad_gateway")
 		lg.Warn("proxy client failed", "provider", ref.ProviderSlug, "proxy", ref.Provider.Proxy, "err", err.Error())
@@ -404,22 +414,34 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", ct)
 		}
 		w.WriteHeader(resp.StatusCode)
+		cap := newCapture(4 << 20) // simpan ekor s/d 4MB untuk ekstrak usage
 		var n int64
 		if sse {
 			if fl, ok := w.(http.Flusher); ok {
 				fl.Flush()
-				n, _ = io.Copy(flushWriter{w: w, f: fl}, resp.Body)
+				n, _ = io.Copy(flushWriter{w: io.MultiWriter(w, cap), f: fl}, resp.Body)
 			} else {
-				n, _ = io.Copy(w, resp.Body)
+				n, _ = io.Copy(io.MultiWriter(w, cap), resp.Body)
 			}
 		} else {
-			n, _ = io.Copy(w, resp.Body)
+			n, _ = io.Copy(io.MultiWriter(w, cap), resp.Body)
 		}
 		resp.Body.Close()
 		cancel()
 		el := time.Since(t0)
 		ok2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
 		s.st.Record(ref.ProviderSlug, ref.FullID, el.Milliseconds(), !ok2xx)
+		if ok2xx && s.st != nil && s.st.Usage != nil && callerHash != "" {
+			if toks := extractTotalTokens(cap.Bytes(), sse); toks > 0 {
+				s.st.Usage.Add(callerHash, callerName, toks)
+			}
+		}
+		// Request sukses lewat proxy -> proxy dianggap aktif lagi (hijau).
+		if ok2xx && s.st != nil && s.st.ProxyHealth != nil {
+			if name := strings.TrimSpace(ref.Provider.Proxy); name != "" {
+				s.st.ProxyHealth.SetOK(name)
+			}
+		}
 		lg.Info("req<", "status", resp.StatusCode, "bytes", n, "latencyMs", el.Milliseconds(), "ttftMs", ttft.Milliseconds(), "key", ke.Name)
 		return
 	}
@@ -432,19 +454,19 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	lg.Info("req<", "status", 502)
 }
 
-func resolveProxyURL(snap *config.Snapshot, prov *config.Provider) (string, error) {
+func resolveProxy(snap *config.Snapshot, prov *config.Provider) (proxyType, proxyURL string, err error) {
 	if prov == nil || strings.TrimSpace(prov.Proxy) == "" {
-		return "", nil
+		return "", "", nil
 	}
 	name := strings.TrimSpace(prov.Proxy)
 	p, ok := snap.Raw.ProxyPools[name]
 	if !ok || p == nil {
-		return "", fmt.Errorf("proxy pool %q not found", name)
+		return "", "", fmt.Errorf("proxy pool %q not found", name)
 	}
 	if !p.Enabled {
-		return "", fmt.Errorf("proxy pool %q disabled", name)
+		return "", "", fmt.Errorf("proxy pool %q disabled", name)
 	}
-	return strings.TrimSpace(p.URL), nil
+	return p.Type, strings.TrimSpace(p.URL), nil
 }
 
 func hasRemaining(st *service.Store, ring []*config.KeyEntry, cur int, provSlug string) bool {
@@ -468,4 +490,134 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 	n, err := fw.w.Write(p)
 	fw.f.Flush()
 	return n, err
+}
+
+// capture menyimpan ekor byte (tail) hingga limit agar ekstraksi usage
+// tetap dapat chunk terakhir SSE walau body besar.
+type capture struct {
+	buf   []byte
+	limit int
+}
+
+func newCapture(limit int) *capture {
+	if limit <= 0 {
+		limit = 4 << 20
+	}
+	return &capture{limit: limit}
+}
+
+func (c *capture) Write(p []byte) (int, error) {
+	if c == nil {
+		return len(p), nil
+	}
+	c.buf = append(c.buf, p...)
+	if len(c.buf) > c.limit {
+		c.buf = c.buf[len(c.buf)-c.limit:]
+	}
+	return len(p), nil
+}
+
+func (c *capture) Bytes() []byte {
+	if c == nil {
+		return nil
+	}
+	return c.buf
+}
+
+type usagePayload struct {
+	Usage struct {
+		TotalTokens      int64 `json:"total_tokens"`
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+// extractTotalTokens mengambil total_tokens dari body upstream.
+// sse=true: pindai tiap baris data: dari belakang, ambil usage terakhir.
+// sse=false: unmarshal JSON penuh, fallback ke pindai substring.
+func extractTotalTokens(data []byte, sse bool) uint64 {
+	if len(data) == 0 {
+		return 0
+	}
+	if sse {
+		lines := bytes.Split(data, []byte("\n"))
+		for i := len(lines) - 1; i >= 0; i-- {
+			ln := bytes.TrimSpace(lines[i])
+			if len(ln) == 0 {
+				continue
+			}
+			if bytes.HasPrefix(ln, []byte("data:")) {
+				ln = bytes.TrimSpace(ln[len("data:"):])
+			} else if !(len(ln) > 0 && ln[0] == '{') {
+				continue
+			}
+			if bytes.Equal(ln, []byte("[DONE]")) {
+				continue
+			}
+			var u usagePayload
+			if err := json.Unmarshal(ln, &u); err != nil {
+				continue
+			}
+			if t := usageTotal(u); t > 0 {
+				return uint64(t)
+			}
+		}
+		// Fallback: body SSE mungkin terpotong di tengah JSON,
+		// pindai angka total_tokens terakhir yang utuh.
+		return scanLastTotalTokens(data)
+	}
+	var u usagePayload
+	if err := json.Unmarshal(data, &u); err == nil {
+		if t := usageTotal(u); t > 0 {
+			return uint64(t)
+		}
+	}
+	return scanLastTotalTokens(data)
+}
+
+func usageTotal(u usagePayload) int64 {
+	if u.Usage.TotalTokens > 0 {
+		return u.Usage.TotalTokens
+	}
+	if u.Usage.PromptTokens > 0 || u.Usage.CompletionTokens > 0 {
+		return u.Usage.PromptTokens + u.Usage.CompletionTokens
+	}
+	return 0
+}
+
+// scanLastTotalTokens mencari `"total_tokens":123` terakhir di blob.
+func scanLastTotalTokens(data []byte) uint64 {
+	var last uint64
+	for i := 0; i < len(data); i++ {
+		if !hasKeyAt(data, i, `"total_tokens"`) {
+			continue
+		}
+		j := i + len(`"total_tokens"`)
+		for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\r' || data[j] == '\n' || data[j] == '"' || data[j] == ':' || data[j] == '=') {
+			j++
+		}
+		var n uint64
+		digits := 0
+		for j < len(data) && data[j] >= '0' && data[j] <= '9' {
+			n = n*10 + uint64(data[j]-'0')
+			j++
+			digits++
+		}
+		if digits > 0 {
+			last = n
+		}
+	}
+	return last
+}
+
+func hasKeyAt(data []byte, i int, key string) bool {
+	if i+len(key) > len(data) {
+		return false
+	}
+	for k := 0; k < len(key); k++ {
+		if data[i+k] != key[k] {
+			return false
+		}
+	}
+	return true
 }

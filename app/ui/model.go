@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,9 @@ import (
 	"basicroute/app/cli"
 	"basicroute/app/service"
 )
+
+// proxyTestTimeout adalah batas waktu satu test proxy.
+const proxyTestTimeout = 15 * time.Second
 
 // Version is shown in the header after the app name.
 const Version = "v1.0"
@@ -50,12 +54,13 @@ const (
 // frame is one navigation level. Esc goes back to the previous frame.
 type frame struct {
 	pg         page
-	arg        string // provider slug / pool name / output kind
-	filter     string // filter models (output kind models)
-	cursor     int    // selection index (home menu / cards / list)
-	scroll     int    // content scroll offset (card pages: row index)
-	tail       bool   // logs: follow new lines
-	revealKeys bool   // api keys: show keys in plain text without masking
+	arg        string       // provider slug / pool name / output kind
+	filter     string       // filter models (output kind models)
+	cursor     int          // selection index (home menu / cards / list)
+	scroll     int          // content scroll offset (card pages: row index)
+	tail       bool         // logs: follow new lines
+	revealKeys bool         // api keys: show keys in plain text without masking
+	sel        map[int]bool // proxy: index kartu yang terseleksi (multi)
 }
 
 var homeMenu = []struct {
@@ -83,6 +88,10 @@ type Model struct {
 	// cache log
 	logLines []string
 	logVer   uint64
+	// cache usage api keys: refresh max tiap 3 detik dan hanya saat
+	// halaman Api Key dibuka, agar tidak poll terus di halaman lain.
+	apiUsage   map[string]uint64
+	apiUsageAt time.Time
 }
 
 // New membangun Model awal (halaman home).
@@ -114,6 +123,45 @@ type tickMsg time.Time
 
 type reloadDoneMsg struct{}
 
+// proxyTestResult adalah hasil test satu proxy.
+type proxyTestResult struct {
+	name string
+	err  error
+}
+
+// proxyTestResultMsg dikirim setelah sekumpulan test proxy selesai.
+type proxyTestResultMsg struct {
+	results []proxyTestResult
+}
+
+// testProxiesCmd menjalankan test berurutan (async) ke pool yang enabled.
+func (m Model) testProxiesCmd(names []string) tea.Cmd {
+	snap := m.deps.Store.Get()
+	if snap == nil || snap.Raw == nil {
+		return nil
+	}
+	testURL := snap.Raw.System.ProxyTestURL
+	type job struct{ name, typ, url string }
+	jobs := make([]job, 0, len(names))
+	for _, n := range names {
+		p := snap.Raw.ProxyPools[n]
+		if p == nil || !bool(p.Enabled) {
+			continue
+		}
+		jobs = append(jobs, job{name: n, typ: p.Type, url: strings.TrimSpace(p.URL)})
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		out := make([]proxyTestResult, 0, len(jobs))
+		for _, j := range jobs {
+			out = append(out, proxyTestResult{name: j.name, err: service.TestProxy(j.typ, j.url, testURL, proxyTestTimeout)})
+		}
+		return proxyTestResultMsg{results: out}
+	}
+}
+
 func tickCmd() tea.Msg {
 	return tickMsg(time.Now())
 }
@@ -126,7 +174,12 @@ func (m Model) cur() frame { return m.stack[len(m.stack)-1] }
 
 func (m *Model) setCur(f frame) { m.stack[len(m.stack)-1] = f }
 
-func (m *Model) push(f frame) { m.stack = append(m.stack, f) }
+func (m *Model) push(f frame) {
+	m.stack = append(m.stack, f)
+	if f.pg == pgAPIKeys {
+		m.refreshApiUsage()
+	}
+}
 
 func (m *Model) pop() {
 	if len(m.stack) > 1 {
@@ -182,6 +235,43 @@ func (m Model) sysKeyNames() []string {
 	return out
 }
 
+// refreshApiUsage menarik snapshot usage dari memori (bukan file).
+func (m *Model) refreshApiUsage() {
+	if m.deps.Store == nil || m.deps.Store.Usage == nil {
+		m.apiUsage = map[string]uint64{}
+		m.apiUsageAt = time.Now()
+		return
+	}
+	m.apiUsage = m.deps.Store.Usage.Snapshot()
+	m.apiUsageAt = time.Now()
+}
+
+// apiUsageTotal membaca dari cache 3-detik (hash -> total).
+func (m Model) apiUsageTotal(hash string) uint64 {
+	if hash == "" {
+		return 0
+	}
+	return m.apiUsage[hash]
+}
+
+// ensureApiKeysVisible menggeser scroll agar cursor terlihat (header fixed).
+func (m *Model) ensureApiKeysVisible() {
+	f := m.cur()
+	if f.pg != pgAPIKeys {
+		return
+	}
+	vp := m.viewportH() - 1
+	if vp < 1 {
+		vp = 1
+	}
+	if f.cursor < f.scroll {
+		f.scroll = f.cursor
+	} else if f.cursor >= f.scroll+vp {
+		f.scroll = f.cursor - vp + 1
+	}
+	m.setCur(f)
+}
+
 func clamp(v, lo, hi int) int {
 	if v < lo {
 		return lo
@@ -221,6 +311,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		// Refresh usage api keys max tiap 3 detik dan hanya saat halamannya dibuka.
+		if m.cur().pg == pgAPIKeys && time.Since(m.apiUsageAt) >= 3*time.Second {
+			m.refreshApiUsage()
+		}
 		m.clampAll()
 		return m, tea.Tick(400*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 
@@ -228,10 +322,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.say("reload done — see Logs for details", false)
 		return m, nil
 
+	case proxyTestResultMsg:
+		m.applyProxyTestResults(msg.results)
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
 	return m, nil
+}
+
+// applyProxyTestResults menyimpan status error/ok ke memory dan melapor.
+func (m *Model) applyProxyTestResults(results []proxyTestResult) {
+	if m.deps.Store != nil && m.deps.Store.ProxyHealth != nil {
+		for _, r := range results {
+			if r.err != nil {
+				m.deps.Store.ProxyHealth.SetError(r.name)
+			} else {
+				m.deps.Store.ProxyHealth.SetOK(r.name)
+			}
+		}
+	}
+	var okN, errN int
+	var firstErr string
+	for _, r := range results {
+		if r.err != nil {
+			errN++
+			if firstErr == "" {
+				firstErr = r.name + ": " + r.err.Error()
+			}
+		} else {
+			okN++
+		}
+	}
+	total := len(results)
+	switch {
+	case total == 0:
+		m.say("nothing to test", true)
+	case errN == 0:
+		m.say(fmt.Sprintf("proxy test ok: %d/%d", okN, total), false)
+	default:
+		m.say(fmt.Sprintf("proxy test: %d ok, %d error — %s", okN, errN, firstErr), true)
+	}
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -366,11 +498,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(names) > 0 {
 				f.cursor = (f.cursor + len(names) - 1) % len(names)
 				m.setCur(f)
+				m.ensureApiKeysVisible()
 			}
 		case "down", "j":
 			if len(names) > 0 {
 				f.cursor = (f.cursor + 1) % len(names)
 				m.setCur(f)
+				m.ensureApiKeysVisible()
 			}
 		case "x", "X":
 			f.revealKeys = !f.revealKeys
@@ -380,53 +514,78 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.say("keys masked (x: reveal)", false)
 			}
 			m.setCur(f)
+		case "pgup":
+			f.scroll -= m.viewportH() - 1
+			m.setCur(f)
+		case "pgdown":
+			f.scroll += m.viewportH() - 1
+			m.setCur(f)
+		case "home", "g":
+			f.scroll = 0
+			m.setCur(f)
+		case "end", "G":
+			f.scroll = 1 << 30
+			m.setCur(f)
 		}
 	case pgProxies:
 		cards := m.proxyCards()
 		n := len(cards)
 		cols := m.proxyCols(n)
 		switch key {
-		case "left", "h":
+		case "left", "h", "right", "l", "up", "k", "down", "j":
 			if n > 0 {
-				f.cursor = (f.cursor + n - 1) % n
+				f.cursor = moveProxyCursor(f.cursor, key, n, cols)
+				f.sel = nil // navigasi biasa = reset seleksi
 				m.setCur(f)
 				m.ensureCardVisible()
 			}
-		case "right", "l":
+		case "shift+left", "shift+right", "shift+up", "shift+down":
 			if n > 0 {
-				f.cursor = (f.cursor + 1) % n
-				m.setCur(f)
-				m.ensureCardVisible()
-			}
-		case "up", "k":
-			if n > 0 {
-				c := f.cursor
-				if c-cols >= 0 {
-					c -= cols
-				} else {
-					for c+cols < n {
-						c += cols
-					}
+				prev := f.cursor
+				f.cursor = moveProxyCursor(f.cursor, strings.TrimPrefix(key, "shift+"), n, cols)
+				if f.sel == nil {
+					f.sel = map[int]bool{}
 				}
-				f.cursor = c
+				f.sel[prev] = true
+				f.sel[f.cursor] = true
 				m.setCur(f)
 				m.ensureCardVisible()
 			}
-		case "down", "j":
+		case "ctrl+a":
 			if n > 0 {
-				c := f.cursor
-				if c+cols < n {
-					c += cols
-				} else {
-					c = c % cols
-					if c >= n {
-						c = n - 1
-					}
+				f.sel = make(map[int]bool, n)
+				for i := 0; i < n; i++ {
+					f.sel[i] = true
 				}
-				f.cursor = c
 				m.setCur(f)
-				m.ensureCardVisible()
+				m.say(fmt.Sprintf("%d proxy selected", n), false)
 			}
+		case "t":
+			if f.cursor >= 0 && f.cursor < n {
+				c := cards[f.cursor]
+				if !c.enabled {
+					m.say("proxy "+c.name+" is disabled — cannot test", true)
+					return m, nil
+				}
+				m.say("testing "+c.name+"…", false)
+				return m, m.testProxiesCmd([]string{c.name})
+			}
+		case "y":
+			names, skipped := selectedProxyNames(cards, f)
+			if len(names) == 0 {
+				if skipped > 0 {
+					m.say("selected proxy is disabled — cannot test", true)
+				} else {
+					m.say("no proxy selected", true)
+				}
+				return m, nil
+			}
+			msg := fmt.Sprintf("testing %d proxy…", len(names))
+			if skipped > 0 {
+				msg = fmt.Sprintf("testing %d proxy (%d disabled skipped)…", len(names), skipped)
+			}
+			m.say(msg, false)
+			return m, m.testProxiesCmd(names)
 		case "enter", " ":
 			if f.cursor >= 0 && f.cursor < n {
 				m.push(frame{pg: pgProxy, arg: cards[f.cursor].name})
@@ -545,6 +704,12 @@ func (m *Model) clampAll() {
 		} else {
 			f.cursor = clamp(f.cursor, 0, n-1)
 		}
+		// Buang seleksi yang di luar jangkauan setelah reload/resize.
+		for i := range f.sel {
+			if i < 0 || i >= n {
+				delete(f.sel, i)
+			}
+		}
 		rows := provRows(n, m.proxyCols(n))
 		f.scroll = clamp(f.scroll, 0, imax(rows-m.proxyVisRows(), 0))
 	case pgAPIKeys:
@@ -554,8 +719,12 @@ func (m *Model) clampAll() {
 		} else {
 			f.cursor = clamp(f.cursor, 0, n-1)
 		}
-		pl, _, _, _ := m.pageLines(f)
-		f.scroll = clamp(f.scroll, 0, maxScroll(len(pl), m.viewportH()))
+		// Header fixed 1 baris, body = viewport-1.
+		vp := m.viewportH() - 1
+		if vp < 1 {
+			vp = 1
+		}
+		f.scroll = clamp(f.scroll, 0, maxScroll(n, vp))
 	case pgLogs:
 		if f.tail {
 			f.scroll = maxScroll(len(m.logLines), m.viewportH())

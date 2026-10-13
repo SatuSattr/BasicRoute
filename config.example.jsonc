@@ -3,15 +3,17 @@
     "host": "<ENV:HOST|0.0.0.0>",
     "port": "<ENV:PORT|21172>",
     "requireAuth": true,
+    "usageFile": "/app/data/usage.json",
+    "proxyTestUrl": "https://www.gstatic.com/generate_204",
     "keys": {
       "admin-1": {
         "key": "<ENV:BR_ADMIN_KEY|br_admin_example_change-me>",
-        "enabled": true
-      }
+        "enabled": true,
+      },
     },
     "limits": {
-      "maxBodyMB": 10
-    }
+      "maxBodyMB": 10,
+    },
   },
   "providers": {
     "openai-direct": {
@@ -23,22 +25,30 @@
       "enabled": true,
       "timeoutSecs": 60,
       "keys": {
-        "key-1": { "key": "<ENV:OPENAI_KEY_1|sk-example-1>", "order": 1, "enabled": true },
-        "key-2": { "key": "<ENV:OPENAI_KEY_2|sk-example-2>", "order": 2, "enabled": true }
+        "key-1": {
+          "key": "<ENV:OPENAI_KEY_1|sk-example-1>",
+          "order": 1,
+          "enabled": true,
+        },
+        "key-2": {
+          "key": "<ENV:OPENAI_KEY_2|sk-example-2>",
+          "order": 2,
+          "enabled": true,
+        },
       },
       "models": {
         "gpt-4o-mini": {
           "name": "GPT-4o Mini",
           "enabled": true,
           "created": 1686935002,
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 },
         },
         "gpt-4o": {
           "name": "GPT-4o",
           "enabled": true,
-          "limit": { "context": 128000, "output": 4096 }
-        }
-      }
+          "limit": { "context": 128000, "output": 4096 },
+        },
+      },
     },
     "acme-eu": {
       "name": "Acme EU",
@@ -50,27 +60,41 @@
       "enabled": true,
       "timeoutSecs": 90,
       "keys": {
-        "key-1": { "key": "<ENV:ACME_KEY_1|acme-key-1>", "order": 1, "enabled": true },
-        "key-2": { "key": "<ENV:ACME_KEY_2|acme-key-2>", "order": 2, "enabled": true }
+        "key-1": {
+          "key": "<ENV:ACME_KEY_1|acme-key-1>",
+          "order": 1,
+          "enabled": true,
+        },
+        "key-2": {
+          "key": "<ENV:ACME_KEY_2|acme-key-2>",
+          "order": 2,
+          "enabled": true,
+        },
       },
       "models": {
         "acme-large": {
           "name": "Acme Large",
           "enabled": true,
-          "limit": { "context": 64000, "output": 8192 }
+          "limit": { "context": 64000, "output": 8192 },
         },
         "acme-small": {
           "name": "Acme Small",
           "enabled": true,
-          "limit": { "context": 32000, "output": 4096 }
-        }
-      }
-    }
+          "limit": { "context": 32000, "output": 4096 },
+        },
+      },
+    },
   },
   "proxyPools": {
     "pool-eu": {
-      "url": "http://127.0.0.1:8080",
-      "enabled": true
-    }
-  }
+      "type": "http",
+      "url": "http://customer123:your_password@proxy.example.com:8080",
+      "enabled": true,
+    },
+    "pool-relay": {
+      "type": "relay",
+      "url": "https://relay-kamu.vercel.app",
+      "enabled": false,
+    },
+  },
 }

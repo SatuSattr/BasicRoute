@@ -15,6 +15,13 @@ func CooldownKey(providerSlug, keyName string) string {
 type Store struct {
 	snap atomic.Pointer[config.Snapshot]
 
+	// Usage melacak total token per system key (hash -> total).
+	// Diisi di main, boleh nil pada test lama.
+	Usage *UsageTracker
+
+	// ProxyHealth menandai proxy pool yang error (memory only).
+	ProxyHealth *ProxyHealth
+
 	mu       sync.RWMutex
 	hits     map[string]uint64
 	errs     map[string]uint64
@@ -33,11 +40,12 @@ type Store struct {
 
 func NewStore(s *config.Snapshot) *Store {
 	st := &Store{
-		cooldown: map[string]time.Time{},
-		hits:     map[string]uint64{},
-		errs:     map[string]uint64{},
-		latSum:   map[string]int64{},
-		latCount: map[string]uint64{},
+		cooldown:    map[string]time.Time{},
+		hits:        map[string]uint64{},
+		errs:        map[string]uint64{},
+		latSum:      map[string]int64{},
+		latCount:    map[string]uint64{},
+		ProxyHealth: NewProxyHealth(),
 	}
 	if s != nil {
 		st.snap.Store(s)

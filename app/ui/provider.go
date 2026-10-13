@@ -254,6 +254,27 @@ func padRight(s string, n int) string {
 	}
 }
 
+// shortNum memadatkan angka besar agar kolom tetap ramping:
+// 125000 -> "125k", 1000000 -> "1M", 2500000000 -> "2.5B".
+// Di bawah 1000 tampil apa adanya.
+func shortNum(n int) string {
+	switch {
+	case n >= 1_000_000_000:
+		return trimDec(float64(n)/1_000_000_000) + "B"
+	case n >= 1_000_000:
+		return trimDec(float64(n)/1_000_000) + "M"
+	case n >= 1_000:
+		return trimDec(float64(n)/1_000) + "k"
+	default:
+		return fmt.Sprint(n)
+	}
+}
+
+// trimDec mencetak 1 desimal lalu membuang ".0": 1 -> "1", 1.5 -> "1.5".
+func trimDec(f float64) string {
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", f), ".0")
+}
+
 // lookupProv mencari provider by slug/prefix (case-insensitive), seperti CLI.
 func lookupProv(snap *config.Snapshot, arg string) (string, *config.Provider) {
 	a := strings.TrimSpace(arg)
@@ -363,7 +384,7 @@ func (m Model) providerDetail(f frame) []dline {
 	if len(krows) == 0 {
 		out = append(out, dline{[]dseg{{"(no keys)", styleDetLbl}}})
 	} else {
-		nW, oW, sW, cW := runeLen("NAME"), runeLen("ORDER"), runeLen("STATUS"), runeLen("COOLDOWN")
+		nW, oW, cW := runeLen("NAME"), runeLen("ORDER"), runeLen("COOLDOWN")
 		for _, r := range krows {
 			nW = max(nW, runeLen(r.name))
 			oW = max(oW, runeLen(fmt.Sprint(r.ord)))
@@ -373,27 +394,24 @@ func (m Model) providerDetail(f frame) []dline {
 		}
 		nW += 2
 		oW += 2
-		sW += 2
 		cW += 2
 		out = append(out, dline{[]dseg{
-			{padRight("NAME", nW) + padRight("ORDER", oW) + padRight("STATUS", sW) + padRight("COOLDOWN", cW) + "KEY", styleDetLbl},
+			// Header NAME digeser 2 spasi agar sejajar teks nama di bawah dot "• ".
+			{padRight("NAME", nW+2) + padRight("ORDER", oW) + padRight("COOLDOWN", cW) + "KEY", styleDetLbl},
 		}})
 		for _, r := range krows {
-			st, sts := "on", styleDetHi
-			if !r.on {
-				st, sts = "off", styleDetLbl
-			}
-			if r.mask == "" || r.mask == "-" {
-				st, sts = "(null)", styleDetLbl
+			ds := styleDotOff
+			if r.on {
+				ds = styleDotOn
 			}
 			cool, cools := "-", styleDetLbl
 			if r.cool {
 				cool, cools = "cooling", styleLogWarn
 			}
 			out = append(out, dline{[]dseg{
+				{"• ", ds},
 				{padRight(r.name, nW), styleDetVal},
 				{padRight(fmt.Sprint(r.ord), oW), styleDetLbl},
-				{padRight(st, sW), sts},
 				{padRight(cool, cW), cools},
 				{r.mask, styleDetVal},
 			}})
@@ -413,22 +431,24 @@ func (m Model) providerDetail(f frame) []dline {
 	if len(mslugs) == 0 {
 		out = append(out, dline{[]dseg{{"(no models)", styleDetLbl}}})
 	} else {
-		sW, fW, stW, cW, oW := runeLen("SLUG"), runeLen("FULL ID"), runeLen("STATUS"), runeLen("CTX"), runeLen("OUT")
+		sW, fW, cW, oW := runeLen("NAME"), runeLen("FULL ID"), runeLen("CTX"), runeLen("OUT")
 		type mrow struct {
-			slug, full, st, ctx, out, created string
-			on                               bool
+			name, full, ctx, out, created string
+			on                            bool
 		}
 		var mrows []mrow
 		for _, ms := range mslugs {
 			md := p.Models[ms]
-			r := mrow{slug: ms, full: p.Prefix + "/" + ms, st: "off"}
+			r := mrow{name: ms, full: p.Prefix + "/" + ms}
 			if md != nil {
+				if strings.TrimSpace(md.Name) != "" {
+					r.name = md.Name
+				}
 				if bool(md.Enabled) {
 					r.on = true
-					r.st = "on"
 				}
-				r.ctx = fmt.Sprint(int(md.Limit.Context))
-				r.out = fmt.Sprint(int(md.Limit.Output))
+				r.ctx = shortNum(int(md.Limit.Context))
+				r.out = shortNum(int(md.Limit.Output))
 				if int64(md.Created) > 0 {
 					r.created = time.Unix(int64(md.Created), 0).Format("2006-01-02")
 				} else {
@@ -438,28 +458,28 @@ func (m Model) providerDetail(f frame) []dline {
 				r.ctx, r.out, r.created = "-", "-", "-"
 			}
 			mrows = append(mrows, r)
-			sW = max(sW, runeLen(r.slug))
+			sW = max(sW, runeLen(r.name))
 			fW = max(fW, runeLen(r.full))
 			cW = max(cW, runeLen(r.ctx))
 			oW = max(oW, runeLen(r.out))
 		}
 		sW += 2
 		fW += 2
-		stW += 2
 		cW += 2
 		oW += 2
 		out = append(out, dline{[]dseg{
-			{padRight("SLUG", sW) + padRight("FULL ID", fW) + padRight("STATUS", stW) + padRight("CTX", cW) + padRight("OUT", oW) + "CREATED", styleDetLbl},
+			// Header NAME digeser 2 spasi agar sejajar teks nama di bawah dot "• ".
+			{padRight("NAME", sW+2) + padRight("FULL ID", fW) + padRight("CTX", cW) + padRight("OUT", oW) + "CREATED", styleDetLbl},
 		}})
 		for _, r := range mrows {
-			sts := styleDetLbl
+			ds := styleDotOff
 			if r.on {
-				sts = styleDetHi
+				ds = styleDotOn
 			}
 			out = append(out, dline{[]dseg{
-				{padRight(r.slug, sW), styleDetVal},
+				{"• ", ds},
+				{padRight(r.name, sW), styleDetVal},
 				{padRight(r.full, fW), styleDetLbl},
-				{padRight(r.st, stW), sts},
 				{padRight(r.ctx, cW), styleDetVal},
 				{padRight(r.out, oW), styleDetVal},
 				{r.created, styleDetLbl},

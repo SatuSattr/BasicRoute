@@ -209,14 +209,18 @@ func printSystem(out io.Writer, d Deps) {
 	sort.Strings(names)
 	fmt.Fprintf(out, "  keys (%d):\n", len(names))
 	tw2 := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw2, "    NAME\tSTATUS\tKEY")
+	fmt.Fprintln(tw2, "    NAME\tSTATUS\tKEY\tTOTAL TOKENS")
+	usage := map[string]uint64{}
+	if d.Store != nil && d.Store.Usage != nil {
+		usage = d.Store.Usage.Snapshot()
+	}
 	for _, n := range names {
 		k := sys.Keys[n]
 		if k == nil {
-			fmt.Fprintf(tw2, "    %s\t(null)\t-\n", n)
+			fmt.Fprintf(tw2, "    %s\t(null)\t-\t%s\n", n, FormatTokens(0))
 			continue
 		}
-		fmt.Fprintf(tw2, "    %s\t%s\t%s\n", n, onOff(bool(k.Enabled)), maskKey(k.Key))
+		fmt.Fprintf(tw2, "    %s\t%s\t%s\t%s\n", n, onOff(bool(k.Enabled)), maskKey(k.Key), FormatTokens(usage[service.HashSysKey(k.Key)]))
 	}
 	_ = tw2.Flush()
 }
@@ -251,6 +255,11 @@ func printSysKeyDetail(out io.Writer, d Deps, arg string) {
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(tw, "  status\t%s\n", onOff(bool(k.Enabled)))
 	fmt.Fprintf(tw, "  key\t%s\n", maskKey(k.Key))
+	var toks uint64
+	if d.Store != nil && d.Store.Usage != nil {
+		toks = d.Store.Usage.Total(service.HashSysKey(k.Key))
+	}
+	fmt.Fprintf(tw, "  totalTokens\t%s\n", FormatTokens(toks))
 	_ = tw.Flush()
 }
 
@@ -392,18 +401,18 @@ func printProxies(out io.Writer, d Deps) {
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATUS\tURL\tUSED BY")
+	fmt.Fprintln(tw, "NAME\tTYPE\tSTATUS\tHEALTH\tURL\tUSED BY")
 	for _, n := range names {
 		pp := snap.Raw.ProxyPools[n]
 		if pp == nil {
-			fmt.Fprintf(tw, "%s\t(null)\t-\t-\n", n)
+			fmt.Fprintf(tw, "%s\t(null)\t-\t-\t-\n", n)
 			continue
 		}
 		used := strings.Join(users[n], ", ")
 		if used == "" {
 			used = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", n, onOff(bool(pp.Enabled)), maskProxyURL(pp.URL), used)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", n, proxyTypeLabel(pp.Type), onOff(bool(pp.Enabled)), proxyHealthLabel(d, n), maskProxyURL(pp.URL), used)
 	}
 	_ = tw.Flush()
 	fmt.Fprintln(out, "tip: \"proxy <name>\" for details.")
@@ -437,7 +446,9 @@ func printProxyDetail(out io.Writer, d Deps, arg string) {
 	}
 	fmt.Fprintf(out, "proxy %s:\n", name)
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(tw, "  type\t%s\n", proxyTypeLabel(pp.Type))
 	fmt.Fprintf(tw, "  status\t%s\n", onOff(bool(pp.Enabled)))
+	fmt.Fprintf(tw, "  health\t%s\n", proxyHealthLabel(d, name))
 	fmt.Fprintf(tw, "  url\t%s\n", maskProxyURL(pp.URL))
 	_ = tw.Flush()
 	users := reverseProxyUsers(snap)[name]
@@ -546,6 +557,25 @@ func maskKey(k string) string {
 		return "-"
 	}
 	return "****"
+}
+
+// proxyTypeLabel menormalkan tipe pool untuk tampilan ("http"/"relay").
+func proxyTypeLabel(t string) string {
+	if strings.EqualFold(strings.TrimSpace(t), config.ProxyTypeRelay) {
+		return config.ProxyTypeRelay
+	}
+	return config.ProxyTypeHTTP
+}
+
+// proxyHealthLabel mengembalikan status health proxy dari memory ("ok"/"error").
+func proxyHealthLabel(d Deps, name string) string {
+	if d.Store == nil || d.Store.ProxyHealth == nil {
+		return "ok"
+	}
+	if d.Store.ProxyHealth.IsError(name) {
+		return "error"
+	}
+	return "ok"
 }
 
 func maskProxyURL(raw string) string {

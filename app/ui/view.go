@@ -7,7 +7,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"basicroute/app/cli"
+	"basicroute/app/service"
 )
+
+func sysKeyHash(raw string) string { return service.HashSysKey(raw) }
 
 // chromeLines adalah jumlah baris tetap di luar konten:
 // header(3) + blank(2) + judul halaman(1) + blank(1) + border window(2)
@@ -92,6 +95,14 @@ func (m Model) View() string {
 		}
 		sb.WriteString("\n\n")
 		sb.WriteString(m.providerDetailView(f))
+	case pgAPIKeys:
+		sb.WriteString("\n")
+		sb.WriteString(stylePageTitle.Render(m.pageTitle(f)))
+		if ind := m.scrollIndicator(f); ind != "" {
+			sb.WriteString(" " + styleFooter.Render(ind))
+		}
+		sb.WriteString("\n\n")
+		sb.WriteString(m.apiKeysView(f))
 	default:
 		sb.WriteString("\n")
 		sb.WriteString(stylePageTitle.Render(m.pageTitle(f)))
@@ -238,7 +249,8 @@ func (m Model) pageLines(f frame) (lines []string, kind lineKind, selectIdx int,
 	return nil, lkBody, -1, nil
 }
 
-// apiKeyRows: satu baris per system key (nama + key).
+// apiKeyRows: baris data per system key untuk dipakai pageLines/scroll.
+// Format kolom: nama | keys | total tokens (dipakai juga oleh apiKeysView).
 // reveal=true menampilkan key jelas, false termasking.
 // Mengembalikan juga status enabled per baris untuk warna dot.
 func (m Model) apiKeyRows(reveal bool) ([]string, []bool) {
@@ -247,30 +259,123 @@ func (m Model) apiKeyRows(reveal bool) ([]string, []bool) {
 	if snap == nil || snap.Raw == nil {
 		return nil, nil
 	}
-	nW := 0
-	for _, n := range names {
-		if runeLen(n) > nW {
-			nW = runeLen(n)
-		}
+	nW, kW := runeLen("NAMA"), runeLen("KEYS")
+	type row struct {
+		name, shown, total string
+		on                 bool
 	}
-	nW += 2
-	rows := make([]string, 0, len(names))
-	dots := make([]bool, 0, len(names))
+	rows := make([]row, 0, len(names))
 	for _, n := range names {
 		k := snap.Raw.System.Keys[n]
 		on := k != nil && bool(k.Enabled)
 		shown := "-"
+		var hash string
 		if k != nil {
 			if reveal {
 				shown = k.Key
 			} else {
 				shown = cli.MaskKey(k.Key)
 			}
+			hash = sysKeyHash(k.Key)
 		}
-		rows = append(rows, "•  "+padRight(n, nW)+shown)
-		dots = append(dots, on)
+		rows = append(rows, row{name: n, shown: shown, total: cli.FormatTokens(m.apiUsageTotal(hash)), on: on})
 	}
-	return rows, dots
+	for _, r := range rows {
+		nW = max(nW, runeLen(r.name))
+		kW = max(kW, runeLen(r.shown))
+	}
+	nW += 2
+	kW += 2
+	out := make([]string, 0, len(rows))
+	dots := make([]bool, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, "•  "+padRight(r.name, nW)+padRight(r.shown, kW)+r.total)
+		dots = append(dots, r.on)
+	}
+	return out, dots
+}
+
+// apiKeysView: table NAMA | KEYS | TOTAL TOKENS ala section Keys/Models
+// di halaman detail provider: header label + dot hijau/abu di depan nama.
+// Header fixed, body di-scroll. Baris terpilih di-highlight.
+func (m Model) apiKeysView(f frame) string {
+	inner := m.innerW()
+	vp := m.viewportH()
+	names := m.sysKeyNames()
+	snap := m.deps.Store.Get()
+	if snap == nil || snap.Raw == nil {
+		return styleWin.Width(m.width - 2).Render(styleBody.Render("(snapshot not ready)")) + "\n"
+	}
+	if len(names) == 0 {
+		body := []string{styleBody.Render("(no api keys yet)")}
+		for len(body) < vp {
+			body = append(body, "")
+		}
+		return styleWin.Width(m.width - 2).Render(strings.Join(body, "\n")) + "\n"
+	}
+	nW, kW := runeLen("NAMA"), runeLen("KEYS")
+	type row struct {
+		name, shown, total string
+		on                 bool
+	}
+	data := make([]row, 0, len(names))
+	for _, n := range names {
+		k := snap.Raw.System.Keys[n]
+		on := k != nil && bool(k.Enabled)
+		shown := "-"
+		var hash string
+		if k != nil {
+			if f.revealKeys {
+				shown = k.Key
+			} else {
+				shown = cli.MaskKey(k.Key)
+			}
+			hash = sysKeyHash(k.Key)
+		}
+		data = append(data, row{name: n, shown: shown, total: cli.FormatTokens(m.apiUsageTotal(hash)), on: on})
+	}
+	for _, r := range data {
+		nW = max(nW, runeLen(r.name))
+		kW = max(kW, runeLen(r.shown))
+	}
+	nW += 2
+	kW += 2
+
+	header := dline{[]dseg{
+		{padRight("NAMA", nW+2) + padRight("KEYS", kW) + "TOTAL TOKENS", styleDetLbl},
+	}}.render(inner)
+
+	// Body scroll atas data saja (header fixed).
+	start := clamp(f.scroll, 0, maxScroll(len(data), vp-1))
+	end := start + (vp - 1)
+	if end > len(data) {
+		end = len(data)
+	}
+	vis := make([]string, 0, vp)
+	vis = append(vis, header)
+	for idx := start; idx < end; idx++ {
+		r := data[idx]
+		ds := styleDotOff
+		if r.on {
+			ds = styleDotOn
+		}
+		plain := "•  " + padRight(r.name, nW) + padRight(r.shown, kW) + r.total
+		plain = trunc(plain, inner)
+		if idx == f.cursor {
+			vis = append(vis, ds.Render("•")+"  "+styleItemSel.Width(inner-3).Render(strings.TrimPrefix(plain, "•  ")))
+			continue
+		}
+		vis = append(vis, dline{[]dseg{
+			{"• ", ds},
+			{padRight(r.name, nW), styleDetVal},
+			{padRight(r.shown, kW), styleDetVal},
+			{r.total, styleDetVal},
+		}}.render(inner))
+	}
+	for len(vis) < vp {
+		vis = append(vis, "")
+	}
+	return styleWin.Width(m.width - 2).Render(strings.Join(vis, "\n")) + "\n"
 }
 
 // windowView: konten dalam window border terpisah, di-scroll + dipotong.
@@ -359,6 +464,9 @@ func (m Model) scrollIndicator(f frame) string {
 		vp = m.proxyVisRows()
 	case pgProvider:
 		n = len(m.providerDetail(f))
+	case pgAPIKeys:
+		// Header fixed 1 baris, body = vp-1.
+		n = len(m.sysKeyNames()) + 1
 	default:
 		pl, _, _, _ := m.pageLines(f)
 		n = len(pl)
@@ -460,6 +568,7 @@ func (m Model) footerView() string {
 		return hintLine(
 			"←→↑↓", "select",
 			"Enter", "details",
+			"t", "test",
 			"Esc", "back",
 			"/", "command",
 		)

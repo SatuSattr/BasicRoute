@@ -43,6 +43,8 @@ Top-level keys: `system`, `providers`, `proxyPools`.
 | `requireAuth`      | bool   | yes      | when `true`, at least one enabled system key is required                                             |
 | `keys`             | map    | yes      | system API keys: `{ "name": { "key", "enabled" } }`; may be empty only when `requireAuth` is `false` |
 | `limits.maxBodyMB` | number | yes      | must be > 0                                                                                          |
+| `usageFile`        | string | no       | token-usage store path (default `/app/data/usage.json`); accumulated in memory, flushed every 3 min  |
+| `proxyTestUrl`     | string | no       | URL requested when testing a proxy pool (default `https://www.gstatic.com/generate_204`)             |
 
 ### `providers`
 
@@ -67,10 +69,16 @@ Model entry: `{ "name", "enabled", "limit": { "context", "output" }, "created?" 
 
 May be empty (`{}`) — then every provider connects direct.
 
-| Field     | Type   | Required | Rules                                                                                              |
-| --------- | ------ | -------- | -------------------------------------------------------------------------------------------------- |
-| `url`     | string | yes      | `http`/`https` URL (`socks5` is not supported); may embed `user:password@` (masked in UI and logs) |
-| `enabled` | bool   | yes      | pool flag, shown in the TUI card indicator                                                         |
+| Field     | Type   | Required | Rules                                                                                                                             |
+| --------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `type`    | string | no       | `"http"` (default) = forward proxy standard, `"relay"` = http relay ala 9router                                                   |
+| `url`     | string | yes      | `http`/`https` URL (`socks5` is not supported); `http` type may embed `user:password@` (masked in UI and logs); `relay` takes no credentials |
+| `enabled` | bool   | yes      | pool flag, shown in the TUI card indicator                                                                                        |
+
+Two proxy flavors:
+
+- **`http`** — forward proxy standard (`711Proxy`, `9Proxy`, dsb): `http://customer123:your_password@proxy.example.com:8080`. Credentials travel as `Proxy-Authorization`, the TLS session stays end-to-end. Percent-encode the password if it contains `@ : / ? # %` (e.g. `p@ss:wo/rd` → `p%40ss%3Awo%2Frd`).
+- **`relay`** — http relay self-host gratis (Vercel / Cloudflare Worker / Deno, template dari 9router): `https://relay-kamu.vercel.app`. The request is sent to the relay URL with `x-relay-target: https://api.provider.com` and `x-relay-path: /v1/...` headers; the relay `fetch()`es upstream from the edge IP. No auto-deploy here — deploy the relay yourself, then point `url` at it.
 
 ### Flexible numbers & booleans
 
@@ -120,10 +128,12 @@ When stdin is an interactive terminal, BasicRoute opens a fullscreen TUI (gray/b
 | `Esc`            | back                                                               |
 | `x` (Api Key)    | reveal / mask all keys                                             |
 | `/` then command | same commands as pipe mode (`provider acme`, `models`, `stats`, …) |
+| `t` (Proxy)      | test selected proxy pool (green = ok, red = failed; memory only)   |
+| `y` (Proxy)      | test all selected pools in order (`shift+↑↓` / `ctrl+a` to select) |
 | `r`              | reload config                                                      |
 | `q` / `Ctrl+C`   | graceful shutdown                                                  |
 
-Pages: **Api Key** (system key list, detail visible inline — green `•` = enabled, gray = disabled — `x` reveals/masks all keys), **Logs** (dedicated slog window, follows tail, `End` re-follows), **Provider** (responsive card grid: `•` name, inline `Keys: a/b  Models: c/d`, `Proxy:` — green `•` = enabled, gray = disabled — → detail with _Basic info_, _Keys_, _Models_ sections), **Proxy** (responsive card grid: `•` name, `Clients: n` providers using it — green `•` = pool enabled, gray = disabled — → detail).
+Pages: **Api Key** (system key table: `NAMA | KEYS | TOTAL TOKENS`, green `•` = enabled, gray = disabled, `x` reveals/masks all keys, totals refresh every 3 s while the page is open), **Logs** (dedicated slog window, follows tail, `End` re-follows), **Provider** (responsive card grid: `•` name, inline `Keys: a/b  Models: c/d`, `Proxy:` — green `•` = enabled, gray = disabled — → detail with _Basic info_, _Keys_, _Models_ sections), **Proxy** (responsive card grid: `•` name, `Clients: n` providers using it — green `•` = enabled, gray = disabled, red `•` = test failed — `t` tests the highlighted pool, `y` tests the selected pools; a pool marked red is only an indicator, providers still try it and a later success turns it green again).
 
 Piped/non-terminal stdin falls back to the plain line CLI:
 
