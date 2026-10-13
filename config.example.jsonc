@@ -1,101 +1,76 @@
-// BasicRoute example config
-// Skema ini harus cocok dengan struct di app/config/config.go.
-// Decoder memakai DisallowUnknownFields: jangan tambah field di luar skema.
-//
-// Placeholder env: nilai APAPUN bisa diisi dari environment / .env:
-//   "key": "<ENV:API_KEY>"            // wajib ada, error bila hilang
-//   "port": "<ENV:PORT|21172>"        // fallback default bila env hilang
-//   "host": "<ENV:HOST:-0.0.0.0>"    // bentuk ":-" juga bisa
-//   "baseUrl": "https://<ENV:DOMAIN>/v1" // substring dalam string
-// Angka/boolean boleh tetap dikutip ("<ENV:PORT>") karena decoder menerima
-// string angka ("21172", "true"/"1"). Tanpa kutip ("port": <ENV:PORT>) juga
-// bisa, tapi value harus fragmen JSON valid. File .env dicari otomatis di
-// <dir-config>/.env lalu ./.env (OS env selalu menang); flag -env menunjuk
-// file eksplisit, "-env -" menonaktifkan pencarian .env.
 {
-  // System: bind address + auth + batas global.
   "system": {
-    "host": "<ENV:HOST|0.0.0.0>", // bind semua interface
+    "host": "<ENV:HOST|0.0.0.0>",
     "port": "<ENV:PORT|21172>",
-    "requireAuth": true, // jika true, butuh >=1 system key enabled
+    "requireAuth": true,
     "keys": {
-      // 1 system key contoh (isi dari env, fallback contoh bila env hilang)
       "admin-1": {
-        "key": "<ENV:BR_ADMIN_KEY|br_admin_contoh_change-me>",
-        "enabled": true,
-      },
+        "key": "<ENV:BR_ADMIN_KEY|br_admin_example_change-me>",
+        "enabled": true
+      }
     },
     "limits": {
-      "maxBodyMB": 10, // harus > 0
-    },
+      "maxBodyMB": 10
+    }
   },
-
-  // Providers: key = slug internal (bebas), prefix = namespace model publik.
   "providers": {
-    // Provider 1: chat-completions direct tanpa proxy
     "openai-direct": {
       "name": "OpenAI Direct",
-      "prefix": "openai", // unik, regex ^[a-z0-9-]+$
-      "type": "openai", // v1: hanya "openai"
-      "interface": "chat-completions", // enum: chat-completions | responses-api
-      "baseUrl": "https://api.openai.com/v1", // trailing / otomatis di-trim
-      // tanpa field "proxy" = direct
+      "prefix": "openai",
+      "type": "openai",
+      "interface": "chat-completions",
+      "baseUrl": "https://api.openai.com/v1",
       "enabled": true,
       "timeoutSecs": 60,
       "keys": {
-        "key-1": { "key": "<ENV:OPENAI_KEY_1|sk-contoh-1>", "order": 1, "enabled": true },
-        "key-2": { "key": "<ENV:OPENAI_KEY_2|sk-contoh-2>", "order": 2, "enabled": true },
+        "key-1": { "key": "<ENV:OPENAI_KEY_1|sk-example-1>", "order": 1, "enabled": true },
+        "key-2": { "key": "<ENV:OPENAI_KEY_2|sk-example-2>", "order": 2, "enabled": true }
       },
       "models": {
         "gpt-4o-mini": {
           "name": "GPT-4o Mini",
           "enabled": true,
-          "created": 1686935002, // opsional: unix timestamp utk field "created" di /v1/models (0/absen = di-omit)
-          "limit": { "context": 128000, "output": 16384 }, // internal, TIDAK diekspos ke /v1/models
+          "created": 1686935002,
+          "limit": { "context": 128000, "output": 16384 }
         },
         "gpt-4o": {
           "name": "GPT-4o",
           "enabled": true,
-          "limit": { "context": 128000, "output": 4096 },
-        },
-      },
+          "limit": { "context": 128000, "output": 4096 }
+        }
+      }
     },
-
-    // Provider 2: responses-api via proxy pool-eu
     "acme-eu": {
       "name": "Acme EU",
       "prefix": "acme",
       "type": "openai",
       "interface": "responses-api",
       "baseUrl": "https://eu.acme.example/v1/",
-      "proxy": "pool-eu", // harus ada di proxyPools
+      "proxy": "pool-eu",
       "enabled": true,
       "timeoutSecs": 90,
       "keys": {
         "key-1": { "key": "<ENV:ACME_KEY_1|acme-key-1>", "order": 1, "enabled": true },
-        "key-2": { "key": "<ENV:ACME_KEY_2|acme-key-2>", "order": 2, "enabled": true },
+        "key-2": { "key": "<ENV:ACME_KEY_2|acme-key-2>", "order": 2, "enabled": true }
       },
       "models": {
-        /* dua model contoh dengan limit context/output */
         "acme-large": {
           "name": "Acme Large",
           "enabled": true,
-          "limit": { "context": 64000, "output": 8192 },
+          "limit": { "context": 64000, "output": 8192 }
         },
         "acme-small": {
           "name": "Acme Small",
           "enabled": true,
-          "limit": { "context": 32000, "output": 4096 },
-        },
-      },
-    },
+          "limit": { "context": 32000, "output": 4096 }
+        }
+      }
+    }
   },
-
-  // Proxy pools: key = nama pool yang dirujuk provider.proxy
   "proxyPools": {
     "pool-eu": {
       "url": "http://127.0.0.1:8080",
-      "enabled": true,
-    },
-  },
+      "enabled": true
+    }
+  }
 }

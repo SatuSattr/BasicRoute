@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-
 type FlexInt int
 
 func (v *FlexInt) UnmarshalJSON(data []byte) error {
@@ -25,7 +24,7 @@ func (v *FlexInt) UnmarshalJSON(data []byte) error {
 		str = strings.TrimSpace(str)
 		n, err := strconv.Atoi(str)
 		if err != nil {
-			return fmt.Errorf("flexint: %q bukan integer valid", str)
+			return fmt.Errorf("flexint: %q is not a valid integer", str)
 		}
 		*v = FlexInt(n)
 		return nil
@@ -53,7 +52,7 @@ func (v *FlexFloat) UnmarshalJSON(data []byte) error {
 		str = strings.TrimSpace(str)
 		f, err := strconv.ParseFloat(str, 64)
 		if err != nil {
-			return fmt.Errorf("flexfloat: %q bukan angka valid", str)
+			return fmt.Errorf("flexfloat: %q is not a valid number", str)
 		}
 		*v = FlexFloat(f)
 		return nil
@@ -86,7 +85,7 @@ func (v *FlexBool) UnmarshalJSON(data []byte) error {
 			*v = false
 			return nil
 		default:
-			return fmt.Errorf("flexbool: %q bukan boolean valid (mau true/false/1/0)", str)
+			return fmt.Errorf("flexbool: %q is not a valid boolean (want true/false/1/0)", str)
 		}
 	}
 	var b bool
@@ -96,7 +95,6 @@ func (v *FlexBool) UnmarshalJSON(data []byte) error {
 	*v = FlexBool(b)
 	return nil
 }
-
 
 func parseDotEnv(src string) map[string]string {
 	out := map[string]string{}
@@ -238,7 +236,6 @@ func makeLookup(extra map[string]string) func(string) (string, bool) {
 	}
 }
 
-
 const envPlaceholderPrefix = "<ENV:"
 
 func expandEnvPlaceholders(src []byte, lookup func(string) (string, bool)) ([]byte, error) {
@@ -304,7 +301,7 @@ func expandEnvPlaceholders(src []byte, lookup func(string) (string, bool)) ([]by
 		i++
 	}
 	if inString {
-		return nil, fmt.Errorf("string tidak ditutup saat ekspansi env (baris %d)", line)
+		return nil, fmt.Errorf("unterminated string during env expansion (line %d)", line)
 	}
 	return out, nil
 }
@@ -322,12 +319,12 @@ func resolvePlaceholder(src []byte, start, line int, lookup func(string) (string
 		}
 	}
 	if end < 0 {
-		return "", 0, fmt.Errorf("placeholder env tidak valid (tanpa penutup '>') pada baris %d", line)
+		return "", 0, fmt.Errorf("invalid env placeholder (missing closing '>') on line %d", line)
 	}
 	inner := string(rest[:end])
 	name, def, hasDef := splitPlaceholderInner(inner)
 	if !validEnvName(name) {
-		return "", 0, fmt.Errorf("placeholder env tidak valid %q pada baris %d (nama harus [A-Za-z_][A-Za-z0-9_]*)", "<ENV:"+inner+">", line)
+		return "", 0, fmt.Errorf("invalid env placeholder %q on line %d (name must be [A-Za-z_][A-Za-z0-9_]*)", "<ENV:"+inner+">", line)
 	}
 	if v, ok := lookup(name); ok {
 		return v, start + len(envPlaceholderPrefix) + end + 1, nil
@@ -335,7 +332,7 @@ func resolvePlaceholder(src []byte, start, line int, lookup func(string) (string
 	if hasDef {
 		return def, start + len(envPlaceholderPrefix) + end + 1, nil
 	}
-	return "", 0, fmt.Errorf("env %q tidak ditemukan (placeholder <ENV:%s> pada baris %d, tanpa default)", name, name, line)
+	return "", 0, fmt.Errorf("env %q not found (placeholder <ENV:%s> on line %d, no default)", name, name, line)
 }
 
 func splitPlaceholderInner(inner string) (name, def string, hasDef bool) {

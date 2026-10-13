@@ -4,17 +4,24 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"time"
 )
 
 func Setup(debug bool) *slog.Logger {
+	return SetupTo(debug, os.Stdout)
+}
+
+// SetupTo sama seperti Setup tetapi menulis ke w.
+// Dipakai mode TUI agar log tidak merusak layar dan bisa tampil di window Logs.
+func SetupTo(debug bool, w io.Writer) *slog.Logger {
 	level := slog.LevelInfo
 	if debug {
 		level = slog.LevelDebug
 	}
-	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	h := slog.NewTextHandler(w, &slog.HandlerOptions{
 		Level: level,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey && len(groups) == 0 {

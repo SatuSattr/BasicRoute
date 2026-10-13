@@ -11,7 +11,6 @@ import (
 	"strings"
 )
 
-
 type Config struct {
 	System     System                `json:"system"`
 	Providers  map[string]*Provider  `json:"providers"`
@@ -71,7 +70,6 @@ type ProxyPool struct {
 	Enabled FlexBool `json:"enabled"`
 }
 
-
 type Snapshot struct {
 	Gen      uint64
 	Raw      *Config
@@ -92,7 +90,6 @@ type KeyEntry struct {
 	Key   string
 	Order int
 }
-
 
 func StripJSONC(src []byte) []byte {
 	out := make([]byte, len(src))
@@ -197,7 +194,6 @@ func stripTrailingCommas(src []byte) []byte {
 	return out
 }
 
-
 var prefixRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 func Load(path string) (*Snapshot, error) {
@@ -241,13 +237,13 @@ func LoadWithEnv(path, envPath string) (*Snapshot, error) {
 
 func validateAndNormalize(cfg *Config) error {
 	if strings.TrimSpace(cfg.System.Host) == "" {
-		return fmt.Errorf("system.host: harus diisi")
+		return fmt.Errorf("system.host: required")
 	}
 	if cfg.System.Port < 1 || cfg.System.Port > 65535 {
-		return fmt.Errorf("system.port: harus 1-65535, dapat %d", cfg.System.Port)
+		return fmt.Errorf("system.port: must be 1-65535, got %d", cfg.System.Port)
 	}
 	if cfg.System.Limits.MaxBodyMB <= 0 {
-		return fmt.Errorf("system.limits.maxBodyMB: harus > 0, dapat %v", cfg.System.Limits.MaxBodyMB)
+		return fmt.Errorf("system.limits.maxBodyMB: must be > 0, got %v", cfg.System.Limits.MaxBodyMB)
 	}
 	enabledSysKeys := 0
 	for name, k := range cfg.System.Keys {
@@ -255,14 +251,14 @@ func validateAndNormalize(cfg *Config) error {
 			return fmt.Errorf("system.keys[%q]: entry null", name)
 		}
 		if strings.TrimSpace(k.Key) == "" {
-			return fmt.Errorf("system.keys[%q].key: harus diisi", name)
+			return fmt.Errorf("system.keys[%q].key: required", name)
 		}
 		if k.Enabled {
 			enabledSysKeys++
 		}
 	}
 	if cfg.System.RequireAuth && enabledSysKeys == 0 {
-		return fmt.Errorf("system.keys: requireAuth=true butuh >=1 system key enabled")
+		return fmt.Errorf("system.keys: requireAuth=true needs >=1 enabled system key")
 	}
 
 	if cfg.ProxyPools == nil {
@@ -274,22 +270,22 @@ func validateAndNormalize(cfg *Config) error {
 		}
 		u := strings.TrimSpace(p.URL)
 		if u == "" {
-			return fmt.Errorf("proxyPools[%q].url: harus diisi", name)
+			return fmt.Errorf("proxyPools[%q].url: required", name)
 		}
 		parsed, err := url.Parse(u)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return fmt.Errorf("proxyPools[%q].url: URL tidak valid %q", name, p.URL)
+			return fmt.Errorf("proxyPools[%q].url: invalid URL %q", name, p.URL)
 		}
 		switch strings.ToLower(parsed.Scheme) {
 		case "http", "https":
 		default:
-			return fmt.Errorf("proxyPools[%q].url: scheme harus http/https (socks5 belum didukung), dapat %q", name, parsed.Scheme)
+			return fmt.Errorf("proxyPools[%q].url: scheme must be http/https (socks5 not supported), got %q", name, parsed.Scheme)
 		}
 		p.URL = u
 	}
 
 	if len(cfg.Providers) == 0 {
-		return fmt.Errorf("providers: minimal 1 provider")
+		return fmt.Errorf("providers: at least 1 provider required")
 	}
 	seenPrefix := map[string]string{} // prefix -> slug
 	seenFullID := map[string]string{} // fullID -> slug
@@ -299,42 +295,42 @@ func validateAndNormalize(cfg *Config) error {
 			return fmt.Errorf("%s: entry null", base)
 		}
 		if strings.TrimSpace(prov.Name) == "" {
-			return fmt.Errorf("%s.name: harus diisi", base)
+			return fmt.Errorf("%s.name: required", base)
 		}
 		if prov.Prefix == "" || !prefixRe.MatchString(prov.Prefix) {
-			return fmt.Errorf("%s.prefix: harus cocok ^[a-z0-9-]+$, dapat %q", base, prov.Prefix)
+			return fmt.Errorf("%s.prefix: must match ^[a-z0-9-]+$, got %q", base, prov.Prefix)
 		}
 		if other, dup := seenPrefix[prov.Prefix]; dup {
-			return fmt.Errorf("%s.prefix: duplikat %q sudah dipakai %s", base, prov.Prefix, fmt.Sprintf("providers[%q]", other))
+			return fmt.Errorf("%s.prefix: duplicate %q already used by %s", base, prov.Prefix, fmt.Sprintf("providers[%q]", other))
 		}
 		seenPrefix[prov.Prefix] = slug
 
 		if prov.Type != "openai" {
-			return fmt.Errorf("%s.type: harus \"openai\", dapat %q", base, prov.Type)
+			return fmt.Errorf("%s.type: must be \"openai\", got %q", base, prov.Type)
 		}
 		if prov.Interface != "chat-completions" && prov.Interface != "responses-api" {
-			return fmt.Errorf("%s.interface: harus chat-completions|responses-api, dapat %q", base, prov.Interface)
+			return fmt.Errorf("%s.interface: must be chat-completions|responses-api, got %q", base, prov.Interface)
 		}
 
 		norm := strings.TrimRight(strings.TrimSpace(prov.BaseURL), "/")
 		if norm == "" || !(strings.HasPrefix(norm, "http://") || strings.HasPrefix(norm, "https://")) {
-			return fmt.Errorf("%s.baseUrl: harus http(s) URL, dapat %q", base, prov.BaseURL)
+			return fmt.Errorf("%s.baseUrl: must be an http(s) URL, got %q", base, prov.BaseURL)
 		}
 		prov.BaseURL = norm
 
 		if prov.TimeoutSecs <= 0 {
-			return fmt.Errorf("%s.timeoutSecs: harus > 0, dapat %d", base, prov.TimeoutSecs)
+			return fmt.Errorf("%s.timeoutSecs: must be > 0, got %d", base, prov.TimeoutSecs)
 		}
 
 		if strings.TrimSpace(prov.Proxy) != "" {
 			prov.Proxy = strings.TrimSpace(prov.Proxy)
 			if _, ok := cfg.ProxyPools[prov.Proxy]; !ok {
-				return fmt.Errorf("%s.proxy: pool %q tidak ada di proxyPools", base, prov.Proxy)
+				return fmt.Errorf("%s.proxy: pool %q not found in proxyPools", base, prov.Proxy)
 			}
 		}
 
 		if len(prov.Keys) == 0 {
-			return fmt.Errorf("%s.keys: minimal 1 key", base)
+			return fmt.Errorf("%s.keys: at least 1 key required", base)
 		}
 		seenOrder := map[int]string{}
 		enabledKeys := 0
@@ -344,13 +340,13 @@ func validateAndNormalize(cfg *Config) error {
 				return fmt.Errorf("%s: entry null", kb)
 			}
 			if strings.TrimSpace(k.Key) == "" {
-				return fmt.Errorf("%s.key: harus diisi", kb)
+				return fmt.Errorf("%s.key: required", kb)
 			}
 			if k.Order < 1 {
-				return fmt.Errorf("%s.order: harus >= 1, dapat %d", kb, int(k.Order))
+				return fmt.Errorf("%s.order: must be >= 1, got %d", kb, int(k.Order))
 			}
 			if other, dup := seenOrder[int(k.Order)]; dup {
-				return fmt.Errorf("%s.order: duplikat order %d sudah dipakai %s", kb, int(k.Order), fmt.Sprintf("%s.keys[%q]", base, other))
+				return fmt.Errorf("%s.order: duplicate order %d already used by %s", kb, int(k.Order), fmt.Sprintf("%s.keys[%q]", base, other))
 			}
 			seenOrder[int(k.Order)] = kname
 			if k.Enabled {
@@ -359,7 +355,7 @@ func validateAndNormalize(cfg *Config) error {
 		}
 
 		if len(prov.Models) == 0 {
-			return fmt.Errorf("%s.models: minimal 1 model", base)
+			return fmt.Errorf("%s.models: at least 1 model required", base)
 		}
 		enabledModels := 0
 		for mslug, m := range prov.Models {
@@ -368,33 +364,33 @@ func validateAndNormalize(cfg *Config) error {
 				return fmt.Errorf("%s: entry null", mb)
 			}
 			if strings.TrimSpace(mslug) == "" {
-				return fmt.Errorf("%s: slug model kosong", base)
+				return fmt.Errorf("%s: empty model slug", base)
 			}
 			if m.Limit.Context <= 0 {
-				return fmt.Errorf("%s.limit.context: harus > 0, dapat %d", mb, m.Limit.Context)
+				return fmt.Errorf("%s.limit.context: must be > 0, got %d", mb, m.Limit.Context)
 			}
 			if m.Limit.Output <= 0 {
-				return fmt.Errorf("%s.limit.output: harus > 0, dapat %d", mb, m.Limit.Output)
+				return fmt.Errorf("%s.limit.output: must be > 0, got %d", mb, m.Limit.Output)
 			}
 			if m.Created < 0 {
-				return fmt.Errorf("%s.created: harus >= 0 (unix timestamp, 0 = tidak diekspos), dapat %d", mb, int(m.Created))
+				return fmt.Errorf("%s.created: must be >= 0 (unix timestamp, 0 = omitted), got %d", mb, int(m.Created))
 			}
 			if m.Enabled {
 				enabledModels++
 			}
 			fullID := prov.Prefix + "/" + mslug
 			if other, dup := seenFullID[fullID]; dup {
-				return fmt.Errorf("%s: FullID duplikat %q sudah dipakai %s", mb, fullID, other)
+				return fmt.Errorf("%s: duplicate FullID %q already used by %s", mb, fullID, other)
 			}
 			seenFullID[fullID] = base
 		}
 
 		if prov.Enabled {
 			if enabledKeys == 0 {
-				return fmt.Errorf("%s.keys: provider enabled butuh >=1 key enabled", base)
+				return fmt.Errorf("%s.keys: enabled provider needs >=1 enabled key", base)
 			}
 			if enabledModels == 0 {
-				return fmt.Errorf("%s.models: provider enabled butuh >=1 model enabled", base)
+				return fmt.Errorf("%s.models: enabled provider needs >=1 enabled model", base)
 			}
 		}
 	}

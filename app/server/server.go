@@ -80,7 +80,6 @@ func (s *Server) apiAlias(mux *http.ServeMux) http.HandlerFunc {
 	}
 }
 
-
 func writeErr(w http.ResponseWriter, status int, msg, typ, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -92,7 +91,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
-
 
 func realIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -150,7 +148,6 @@ func (s *Server) draining() bool {
 	return s.st.IsDraining()
 }
 
-
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
@@ -175,7 +172,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"stats":      stats,
 	})
 }
-
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -212,7 +208,6 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.ModelsListResponse{Object: "list", Data: data})
 }
 
-
 func (s *Server) handleModelOne(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
@@ -248,7 +243,6 @@ func (s *Server) handleModelOne(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, http.StatusNotFound, "not found", "invalid_request_error", "not_found")
 }
-
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	reqID := ReqID()

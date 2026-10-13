@@ -13,7 +13,6 @@ import (
 	"time"
 )
 
-
 type Pool struct {
 	mu      sync.RWMutex
 	clients map[string]*http.Client
@@ -63,18 +62,18 @@ func transportFor(proxyURL string) (*http.Transport, error) {
 	if proxyURL != "" {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
-			return nil, fmt.Errorf("upstream: proxy URL tidak valid %q: %w", proxyURL, err)
+			return nil, fmt.Errorf("upstream: invalid proxy URL %q: %w", proxyURL, err)
 		}
 		switch strings.ToLower(u.Scheme) {
 		case "http", "https":
 			if u.Host == "" {
-				return nil, fmt.Errorf("upstream: proxy URL %q tanpa host", proxyURL)
+				return nil, fmt.Errorf("upstream: proxy URL %q has no host", proxyURL)
 			}
 			proxyFn = http.ProxyURL(u)
 		case "socks5", "socks5h":
-			return nil, fmt.Errorf("upstream: socks5 proxy %q tidak didukung (stdlib only) — configure http proxy or direct", proxyURL)
+			return nil, fmt.Errorf("upstream: socks5 proxy %q unsupported (stdlib only) — configure http proxy or direct", proxyURL)
 		default:
-			return nil, fmt.Errorf("upstream: proxy scheme %q tidak didukung (mau http/https), dapat %q", u.Scheme, proxyURL)
+			return nil, fmt.Errorf("upstream: proxy scheme %q unsupported (want http/https), got %q", u.Scheme, proxyURL)
 		}
 	}
 
@@ -93,7 +92,6 @@ func transportFor(proxyURL string) (*http.Transport, error) {
 		ExpectContinueTimeout: 1 * time.Second,
 	}, nil
 }
-
 
 func IsRetryable(status int, err error) bool {
 	switch status {
@@ -139,7 +137,6 @@ func isRetryableNetErr(err error) bool {
 	return false
 }
 
-
 func TargetURL(base, iface string) string {
 	b := strings.TrimRight(strings.TrimSpace(base), "/")
 	switch strings.TrimSpace(iface) {
@@ -157,7 +154,6 @@ func TargetURL(base, iface string) string {
 		return b
 	}
 }
-
 
 var skipHeaders = map[string]struct{}{
 	"connection":          {},
