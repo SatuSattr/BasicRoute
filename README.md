@@ -71,14 +71,14 @@ May be empty (`{}`) — then every provider connects direct.
 
 | Field     | Type   | Required | Rules                                                                                                                             |
 | --------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `type`    | string | no       | `"http"` (default) = forward proxy standard, `"relay"` = http relay ala 9router                                                   |
+| `type`    | string | no       | `"http"` (default) = standard forward proxy, `"relay"` = 9router-style http relay                                          |
 | `url`     | string | yes      | `http`/`https` URL (`socks5` is not supported); `http` type may embed `user:password@` (masked in UI and logs); `relay` takes no credentials |
 | `enabled` | bool   | yes      | pool flag, shown in the TUI card indicator                                                                                        |
 
 Two proxy flavors:
 
-- **`http`** — forward proxy standard (`711Proxy`, `9Proxy`, dsb): `http://customer123:your_password@proxy.example.com:8080`. Credentials travel as `Proxy-Authorization`, the TLS session stays end-to-end. Percent-encode the password if it contains `@ : / ? # %` (e.g. `p@ss:wo/rd` → `p%40ss%3Awo%2Frd`).
-- **`relay`** — http relay self-host gratis (Vercel / Cloudflare Worker / Deno, template dari 9router): `https://relay-kamu.vercel.app`. The request is sent to the relay URL with `x-relay-target: https://api.provider.com` and `x-relay-path: /v1/...` headers; the relay `fetch()`es upstream from the edge IP. No auto-deploy here — deploy the relay yourself, then point `url` at it.
+- **`http`** — standard forward proxy (`711Proxy`, `9Proxy`, etc): `http://customer123:your_password@proxy.example.com:8080`. Credentials travel as `Proxy-Authorization`, the TLS session stays end-to-end. Percent-encode the password if it contains `@ : / ? # %` (e.g. `p@ss:wo/rd` → `p%40ss%3Awo%2Frd`).
+- **`relay`** — self-hosted http relay on free serverless hosting (Vercel / Cloudflare Worker / Deno, using the 9router template): `https://your-relay.vercel.app`. The request is sent to the relay URL with `x-relay-target: https://api.provider.com` and `x-relay-path: /v1/...` headers; the relay `fetch()`es upstream from the edge IP. No auto-deploy here — deploy the relay yourself, then point `url` at it.
 
 ### Flexible numbers & booleans
 
