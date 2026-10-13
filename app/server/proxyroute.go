@@ -44,6 +44,33 @@ func (s *Server) proxyCandidates(snap *config.Snapshot, slug string, prov *confi
 	return targets, nil
 }
 
+// retestTargets mengumpulkan kandidat proxy untuk silent re-test: proxy
+// provider plus proxy spesifik yang dipakai key (dedup tidak perlu, guard
+// per-pool di retestProxy sudah menahan duplikasi).
+func retestTargets(provTargets []service.ProxyTarget, snap *config.Snapshot, keys []*config.KeyEntry) []service.ProxyTarget {
+	out := append([]service.ProxyTarget{}, provTargets...)
+	for _, ke := range keys {
+		tg, _, err := service.ResolveKeyProxies(snap, ke, nil)
+		if err != nil {
+			continue
+		}
+		out = append(out, tg...)
+	}
+	return out
+}
+
+// proxyFailMsg merangkum kegagalan pool proxy untuk respons error.
+func proxyFailMsg(t service.ProxyTarget, err error) string {
+	label := t.Name
+	if label == "" {
+		label = "direct"
+	}
+	if err != nil {
+		return "proxy " + label + " failed: " + err.Error()
+	}
+	return "proxy " + label + " failed"
+}
+
 // maybeRetestProxies memicu silent re-test (background) untuk pool proxy yang
 // sedang flagged error: bila pulih, flag dihapus sehingga pool bisa dipakai
 // lagi. Max satu goroutine per pool dan max sekali per proxyRetestInterval.

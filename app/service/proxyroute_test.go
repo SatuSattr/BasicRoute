@@ -96,6 +96,59 @@ func TestProxyModeDetection(t *testing.T) {
 	}
 }
 
+func TestResolveKeyProxies(t *testing.T) {
+	snap := proxySnap()
+	inherited := []ProxyTarget{{Name: "a", Type: config.ProxyTypeHTTP, URL: "http://127.0.0.1:8081"}}
+
+	// nil -> ikut provider, noFallback=false.
+	tg, nf, err := ResolveKeyProxies(snap, &config.KeyEntry{Name: "k"}, inherited)
+	if err != nil || nf || len(tg) != 1 || tg[0].Name != "a" {
+		t.Fatalf("inherit = %+v nf=%v err=%v", tg, nf, err)
+	}
+
+	// "" -> direct, noFallback=true.
+	empty := ""
+	tg, nf, err = ResolveKeyProxies(snap, &config.KeyEntry{Name: "k", Proxy: &empty}, inherited)
+	if err != nil || !nf || len(tg) != 1 || tg[0].Name != "" {
+		t.Fatalf("direct = %+v nf=%v err=%v", tg, nf, err)
+	}
+
+	// nama pool -> pool itu saja, noFallback=true.
+	name := "b"
+	tg, nf, err = ResolveKeyProxies(snap, &config.KeyEntry{Name: "k", Proxy: &name}, inherited)
+	if err != nil || !nf || len(tg) != 1 || tg[0].Name != "b" || tg[0].URL != "http://127.0.0.1:8082" {
+		t.Fatalf("named = %+v nf=%v err=%v", tg, nf, err)
+	}
+
+	// pool disabled -> error.
+	dis := "c"
+	if _, _, err := ResolveKeyProxies(snap, &config.KeyEntry{Name: "k", Proxy: &dis}, inherited); err == nil {
+		t.Fatal("disabled key pool should error")
+	}
+	// pool tak ada -> error.
+	no := "nope"
+	if _, _, err := ResolveKeyProxies(snap, &config.KeyEntry{Name: "k", Proxy: &no}, inherited); err == nil {
+		t.Fatal("unknown key pool should error")
+	}
+}
+
+func TestKeyProxyLabel(t *testing.T) {
+	snap := proxySnap()
+	p := snap.Raw.Providers["p1"] // proxy "auto" -> label "auto (2)"
+
+	if lbl, inh := KeyProxyLabel(snap, p, nil); !inh || lbl != "auto (2)" {
+		t.Fatalf("inherit label = %q inh=%v", lbl, inh)
+	}
+	empty := ""
+	if lbl, inh := KeyProxyLabel(snap, p, &empty); inh || lbl != "direct" {
+		t.Fatalf("direct label = %q inh=%v", lbl, inh)
+	}
+	name := "b"
+	if lbl, inh := KeyProxyLabel(snap, p, &name); inh || lbl != "b" {
+		t.Fatalf("named label = %q inh=%v", lbl, inh)
+	}
+}
+
 func TestIsProxyFailure(t *testing.T) {
 	if !IsProxyFailure(0, errors.New("dial tcp: connection refused")) {
 		t.Fatal("transport error is a proxy failure")

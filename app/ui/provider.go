@@ -299,11 +299,13 @@ func lookupProv(snap *config.Snapshot, arg string) (string, *config.Provider) {
 }
 
 type pkeyRow struct {
-	name string
-	ord  int
-	on   bool
-	mask string
-	cool bool
+	name    string
+	ord     int
+	on      bool
+	mask    string
+	cool    bool
+	proxy   string
+	inherit bool // proxy diwarisi dari provider (ditampilkan redup)
 }
 
 // provKeyErr melaporkan key provider sedang flagged error (dot merah).
@@ -427,15 +429,18 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 	var krows []pkeyRow
 	for n, k := range p.Keys {
 		if k == nil {
-			krows = append(krows, pkeyRow{name: n})
+			krows = append(krows, pkeyRow{name: n, proxy: "-"})
 			continue
 		}
+		pl, inh := service.KeyProxyLabel(snap, p, k.Proxy)
 		krows = append(krows, pkeyRow{
-			name: n,
-			ord:  int(k.Order),
-			on:   bool(k.Enabled),
-			mask: cli.MaskKey(k.Key),
-			cool: m.deps.Store.Cooldown(service.CooldownKey(slug, n)),
+			name:    n,
+			ord:     int(k.Order),
+			on:      bool(k.Enabled),
+			mask:    cli.MaskKey(k.Key),
+			cool:    m.deps.Store.Cooldown(service.CooldownKey(slug, n)),
+			proxy:   pl,
+			inherit: inh,
 		})
 	}
 	sort.Slice(krows, func(i, j int) bool {
@@ -451,10 +456,11 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 	if len(krows) == 0 {
 		out = append(out, dline{[]dseg{{"(no keys)", styleDetLbl}}})
 	} else {
-		nW, oW, cW := runeLen("NAME"), runeLen("ORDER"), runeLen("COOLDOWN")
+		nW, oW, cW, pW := runeLen("NAME"), runeLen("ORDER"), runeLen("COOLDOWN"), runeLen("PROXY")
 		for _, r := range krows {
 			nW = max(nW, runeLen(r.name))
 			oW = max(oW, runeLen(fmt.Sprint(r.ord)))
+			pW = max(pW, runeLen(r.proxy))
 			if r.cool {
 				cW = max(cW, runeLen("cooling"))
 			}
@@ -462,9 +468,10 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 		nW += 2
 		oW += 2
 		cW += 2
+		pW += 2
 		out = append(out, dline{[]dseg{
 			// Header NAME digeser 2 spasi agar sejajar teks nama di bawah dot "• ".
-			{padRight("NAME", nW+2) + padRight("ORDER", oW) + padRight("COOLDOWN", cW) + "KEY", styleDetLbl},
+			{padRight("NAME", nW+2) + padRight("ORDER", oW) + padRight("COOLDOWN", cW) + padRight("PROXY", pW) + "KEY", styleDetLbl},
 		}})
 		for _, r := range krows {
 			ds := m.provDot(slug, true, r.name, r.on)
@@ -472,11 +479,16 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 			if r.cool {
 				cool, cools = "cooling", styleLogWarn
 			}
+			ps := styleDetVal
+			if r.inherit {
+				ps = styleDetLbl
+			}
 			out = append(out, dline{[]dseg{
 				{"• ", ds},
 				{padRight(r.name, nW), styleDetVal},
 				{padRight(fmt.Sprint(r.ord), oW), styleDetLbl},
 				{padRight(cool, cW), cools},
+				{padRight(r.proxy, pW), ps},
 				{r.mask, styleDetVal},
 			}})
 			keys = append(keys, len(out)-1)

@@ -35,6 +35,62 @@ func loadPools(t *testing.T, pools string) (*Snapshot, error) {
 	return LoadWithEnv(writeCfg(t, fmt.Sprintf(cfgBase, pools)), "-")
 }
 
+func TestProviderKeyProxyField(t *testing.T) {
+	pools := `{"a": {"url": "http://127.0.0.1:8080", "order": 1, "enabled": true}}`
+	baseKey := `{"key": "sk-x", "order": 1, "enabled": true}`
+	old := `"keys": {"k1": ` + baseKey + `}`
+
+	load := func(t *testing.T, keyJSON string) (*Snapshot, error) {
+		t.Helper()
+		body := fmt.Sprintf(cfgBase, pools)
+		body = strings.Replace(body, old, `"keys": {"k1": `+keyJSON+`}`, 1)
+		return LoadWithEnv(writeCfg(t, body), "-")
+	}
+
+	// absen -> nil (ikut proxy provider).
+	snap, err := load(t, baseKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k := snap.Raw.Providers["p1"].Keys["k1"]; k.Proxy != nil {
+		t.Fatalf("absent key proxy must stay nil, got %q", *k.Proxy)
+	}
+
+	// "" -> direct eksplisit (pointer non-nil ke "").
+	snap, err = load(t, `{"key": "sk-x", "order": 1, "enabled": true, "proxy": ""}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := snap.Raw.Providers["p1"].Keys["k1"]
+	if k.Proxy == nil || *k.Proxy != "" {
+		t.Fatalf("empty key proxy must be explicit direct, got %v", k.Proxy)
+	}
+	if got := snap.KeyRings["p1"][0].Proxy; got == nil || *got != "" {
+		t.Fatal("key ring must carry the proxy override")
+	}
+
+	// nama pool valid -> diteruskan ke KeyRings.
+	snap, err = load(t, `{"key": "sk-x", "order": 1, "enabled": true, "proxy": "a"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snap.KeyRings["p1"][0].Proxy; got == nil || *got != "a" {
+		t.Fatalf("key ring proxy = %v", got)
+	}
+
+	// mode auto/round tidak berlaku untuk key.
+	if _, err := load(t, `{"key": "sk-x", "order": 1, "enabled": true, "proxy": "auto"}`); err == nil {
+		t.Fatal("mode keyword for key must fail")
+	}
+	if _, err := load(t, `{"key": "sk-x", "order": 1, "enabled": true, "proxy": "round"}`); err == nil {
+		t.Fatal("mode keyword for key must fail")
+	}
+	// pool tak dikenal ditolak.
+	if _, err := load(t, `{"key": "sk-x", "order": 1, "enabled": true, "proxy": "nope"}`); err == nil {
+		t.Fatal("unknown pool for key must fail")
+	}
+}
+
 func TestProxyPoolTypes(t *testing.T) {
 	// http dengan kredensial ala 711Proxy/9Proxy: valid, tipe dipertahankan.
 	snap, err := loadPools(t, `{"a": {"type": "http",

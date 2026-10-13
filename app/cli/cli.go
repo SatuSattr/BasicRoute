@@ -319,20 +319,22 @@ func printProviderDetail(out io.Writer, d Deps, arg string) {
 
 	// Keys terurut order.
 	type krow struct {
-		name string
-		ord  int
-		on   bool
-		mask string
-		cool bool
+		name  string
+		ord   int
+		on    bool
+		mask  string
+		cool  bool
+		proxy string
 	}
 	var rows []krow
 	for n, k := range p.Keys {
 		if k == nil {
-			rows = append(rows, krow{name: n})
+			rows = append(rows, krow{name: n, proxy: "-"})
 			continue
 		}
 		cool := d.Store.Cooldown(service.CooldownKey(slug, n))
-		rows = append(rows, krow{name: n, ord: int(k.Order), on: bool(k.Enabled), mask: maskKey(k.Key), cool: cool})
+		pl, _ := service.KeyProxyLabel(snap, p, k.Proxy)
+		rows = append(rows, krow{name: n, ord: int(k.Order), on: bool(k.Enabled), mask: maskKey(k.Key), cool: cool, proxy: pl})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].ord != rows[j].ord {
@@ -342,7 +344,7 @@ func printProviderDetail(out io.Writer, d Deps, arg string) {
 	})
 	fmt.Fprintf(out, "  keys (%d):\n", len(rows))
 	tw2 := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw2, "    NAME\tORDER\tSTATUS\tCOOLDOWN\tKEY")
+	fmt.Fprintln(tw2, "    NAME\tORDER\tSTATUS\tCOOLDOWN\tPROXY\tKEY")
 	for _, r := range rows {
 		cool := "-"
 		if r.cool {
@@ -352,7 +354,7 @@ func printProviderDetail(out io.Writer, d Deps, arg string) {
 		if r.mask == "" {
 			st = "(null)"
 		}
-		fmt.Fprintf(tw2, "    %s\t%d\t%s\t%s\t%s\n", r.name, r.ord, st, cool, r.mask)
+		fmt.Fprintf(tw2, "    %s\t%d\t%s\t%s\t%s\t%s\n", r.name, r.ord, st, cool, r.proxy, r.mask)
 	}
 	_ = tw2.Flush()
 

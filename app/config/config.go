@@ -53,6 +53,9 @@ type ProvKey struct {
 	Key     string   `json:"key"`
 	Order   FlexInt  `json:"order"` // urutan failover, unik per provider
 	Enabled FlexBool `json:"enabled"`
+	// Proxy meng-override proxy provider untuk key ini (opsional):
+	// nil/absen = ikut proxy provider, "" = direct, nama pool = pool spesifik.
+	Proxy *string `json:"proxy,omitempty"`
 }
 
 type Model struct {
@@ -106,6 +109,9 @@ type KeyEntry struct {
 	Name  string
 	Key   string
 	Order int
+	// Proxy meng-override proxy provider untuk key ini: nil = ikut provider,
+	// "" = direct, nama pool = pool spesifik (tanpa failover).
+	Proxy *string
 }
 
 func StripJSONC(src []byte) []byte {
@@ -439,6 +445,18 @@ func validateAndNormalize(cfg *Config) error {
 				return fmt.Errorf("%s.order: duplicate order %d already used by %s", kb, int(k.Order), fmt.Sprintf("%s.keys[%q]", base, other))
 			}
 			seenOrder[int(k.Order)] = kname
+			if k.Proxy != nil {
+				v := strings.TrimSpace(*k.Proxy)
+				if _, isMode := ProxyModeOf(v); isMode {
+					return fmt.Errorf("%s.proxy: proxy modes are not supported for keys (use %q for direct or a pool name)", kb, "")
+				}
+				if v != "" {
+					if _, ok := cfg.ProxyPools[v]; !ok {
+						return fmt.Errorf("%s.proxy: pool %q not found in proxyPools (use %q for direct or a pool name)", kb, v, "")
+					}
+				}
+				k.Proxy = &v
+			}
 			if k.Enabled {
 				enabledKeys++
 			}
@@ -518,7 +536,7 @@ func buildSnapshot(cfg *Config) *Snapshot {
 			if k == nil || !k.Enabled {
 				continue
 			}
-			ring = append(ring, &KeyEntry{Name: kname, Key: k.Key, Order: int(k.Order)})
+			ring = append(ring, &KeyEntry{Name: kname, Key: k.Key, Order: int(k.Order), Proxy: k.Proxy})
 		}
 		sort.Slice(ring, func(i, j int) bool {
 			if ring[i].Order != ring[j].Order {

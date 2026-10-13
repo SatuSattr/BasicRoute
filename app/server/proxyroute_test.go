@@ -219,6 +219,72 @@ func TestProxyDirectUnaffected(t *testing.T) {
 	}
 }
 
+// Key dengan proxy spesifik meng-override proxy provider: request lewat pool
+// milik key, bukan pool provider.
+func TestKeyProxyOverridesProvider(t *testing.T) {
+	dead := deadProxy(t)
+	good := relayServer(t, "good")
+	snap := testSnap("pool-dead", map[string]*config.ProxyPool{
+		"pool-dead": {Type: config.ProxyTypeRelay, URL: dead, Order: 1, Enabled: true},
+		"pool-good": {Type: config.ProxyTypeRelay, URL: good.URL, Order: 2, Enabled: true},
+	}, []string{"pool-dead", "pool-good"})
+	key := "pool-good"
+	snap.KeyRings["p1"][0].Proxy = &key
+	srv := newTestServer(snap)
+
+	rec := chatRequest(t, srv, `{"model":"p/m","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "good") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if srv.st.ProxyHealth.IsError("pool-dead") {
+		t.Fatal("provider pool must not be touched when the key overrides it")
+	}
+}
+
+// Key dipatok ke pool mati: request gagal (502) tanpa fallback ke pool provider.
+func TestKeyProxyDeadNoFallback(t *testing.T) {
+	dead := deadProxy(t)
+	good := relayServer(t, "good")
+	snap := testSnap("pool-good", map[string]*config.ProxyPool{
+		"pool-dead": {Type: config.ProxyTypeRelay, URL: dead, Order: 1, Enabled: true},
+		"pool-good": {Type: config.ProxyTypeRelay, URL: good.URL, Order: 2, Enabled: true},
+	}, []string{"pool-dead", "pool-good"})
+	key := "pool-dead"
+	snap.KeyRings["p1"][0].Proxy = &key
+	srv := newTestServer(snap)
+
+	rec := chatRequest(t, srv, `{"model":"p/m","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !srv.st.ProxyHealth.IsError("pool-dead") {
+		t.Fatal("dead key pool must be flagged")
+	}
+	if srv.st.ProxyHealth.IsError("pool-good") {
+		t.Fatal("provider pool must not be used as fallback")
+	}
+}
+
+// Key dengan proxy "" (direct) tidak memakai pool provider.
+func TestKeyProxyDirectOverridesProvider(t *testing.T) {
+	good := relayServer(t, "good")
+	snap := testSnap("pool-good", map[string]*config.ProxyPool{
+		"pool-good": {Type: config.ProxyTypeRelay, URL: good.URL, Order: 1, Enabled: true},
+	}, []string{"pool-good"})
+	snap.Raw.Providers["p1"].BaseURL = "http://127.0.0.1:1" // upstream mati
+	empty := ""
+	snap.KeyRings["p1"][0].Proxy = &empty
+	srv := newTestServer(snap)
+
+	rec := chatRequest(t, srv, `{"model":"p/m","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code == http.StatusOK {
+		t.Fatal("direct key must not go through the provider relay")
+	}
+	if srv.st.ProxyHealth.IsError("pool-good") {
+		t.Fatal("provider pool must not be used for a direct key")
+	}
+}
+
 // Sanity: kandidat round robin benar-benar berotasi di level Store.
 func TestProxyCandidatesRoundRobin(t *testing.T) {
 	snap := testSnap("round", map[string]*config.ProxyPool{

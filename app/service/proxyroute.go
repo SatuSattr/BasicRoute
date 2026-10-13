@@ -69,6 +69,47 @@ func ResolveProxies(snap *config.Snapshot, prov *config.Provider) ([]ProxyTarget
 	return []ProxyTarget{{Name: name, Type: p.Type, URL: strings.TrimSpace(p.URL)}}, nil
 }
 
+// ResolveKeyProxies mengembalikan kandidat proxy efektif untuk satu key:
+//   - ke == nil atau ke.Proxy == nil -> pakai proxy provider (inherited)
+//   - ke.Proxy == ""                 -> direct
+//   - ke.Proxy == nama pool          -> pool itu saja
+//
+// noFallback=true berarti key dipatok ke proxy sendiri (direct/pool): bila
+// koneksi proxy itu mati, request tidak boleh dilanjutkan ke kandidat lain.
+func ResolveKeyProxies(snap *config.Snapshot, ke *config.KeyEntry, inherited []ProxyTarget) ([]ProxyTarget, bool, error) {
+	if ke == nil || ke.Proxy == nil {
+		return inherited, false, nil
+	}
+	name := strings.TrimSpace(*ke.Proxy)
+	if name == "" {
+		return []ProxyTarget{{}}, true, nil
+	}
+	if snap == nil || snap.Raw == nil {
+		return nil, true, fmt.Errorf("key proxy %q: snapshot not ready", name)
+	}
+	p := snap.Raw.ProxyPools[name]
+	if p == nil {
+		return nil, true, fmt.Errorf("key proxy pool %q not found", name)
+	}
+	if !bool(p.Enabled) {
+		return nil, true, fmt.Errorf("key proxy pool %q disabled", name)
+	}
+	return []ProxyTarget{{Name: name, Type: p.Type, URL: strings.TrimSpace(p.URL)}}, true, nil
+}
+
+// KeyProxyLabel merangkum proxy efektif satu key untuk tampilan tabel:
+// "direct", nama pool, atau label provider (singkat) bila key mengikuti
+// provider. inherited=true berarti nilainya diwarisi dari provider.
+func KeyProxyLabel(snap *config.Snapshot, prov *config.Provider, proxy *string) (label string, inherited bool) {
+	if proxy == nil {
+		return ProxyModeShort(snap, prov), true
+	}
+	if v := strings.TrimSpace(*proxy); v != "" {
+		return v, false
+	}
+	return "direct", false
+}
+
 // IsProxyFailure melaporkan apakah satu kegagalan percobaan menandakan
 // masalah proxy (transport error apa pun, atau HTTP 407 Proxy Auth Required),
 // bukan masalah upstream. Context.Canceled dikecualikan karena berarti

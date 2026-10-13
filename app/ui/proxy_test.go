@@ -65,6 +65,41 @@ func TestProxyTableHasOrderColumn(t *testing.T) {
 	}
 }
 
+func TestProviderDetailKeyProxyColumn(t *testing.T) {
+	m := uiTestModel()
+
+	// Key tanpa override: kolom PROXY menampilkan label proxy provider.
+	all := providerDetailText(m)
+	if !strings.Contains(all, "PROXY") {
+		t.Fatalf("keys table missing PROXY column:\n%s", all)
+	}
+	if !strings.Contains(all, "auto (2)") {
+		t.Fatalf("inherited key must show provider proxy label:\n%s", all)
+	}
+
+	// Key dengan proxy "" (direct) eksplisit.
+	snap := m.deps.Store.Get()
+	empty := ""
+	snap.Raw.Providers["acme"].Keys["k1"].Proxy = &empty
+	all = providerDetailText(m)
+	if !strings.Contains(all, "direct") {
+		t.Fatalf("explicit-direct key must show \"direct\":\n%s", all)
+	}
+}
+
+// providerDetailText menggabung semua segmen teks halaman detail provider.
+func providerDetailText(m Model) string {
+	lines, _, _ := m.providerDetail(frame{pg: pgProvider, arg: "acme"})
+	var sb strings.Builder
+	for _, l := range lines {
+		for _, s := range l.segs {
+			sb.WriteString(s.text)
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
 func TestProviderCardProxyLabel(t *testing.T) {
 	m := uiTestModel()
 	cards := m.provCards()

@@ -69,6 +69,10 @@
           "key": "<ENV:ACME_KEY_2|acme-key-2>",
           "order": 2,
           "enabled": true,
+          // Key ini dipatok ke satu pool: request lewat key ini selalu
+          // memakai pool-us (tanpa fallback bila pool-nya mati).
+          // Opsi lain: "" = direct, atau hapus field ini untuk ikut provider.
+          "proxy": "pool-us",
         },
       },
       "models": {

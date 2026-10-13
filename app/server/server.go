@@ -378,36 +378,78 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		hasHealthy = true
 		break
 	}
+	eligible := make([]*config.KeyEntry, 0, len(ring))
+	for _, ke := range ring {
+		if ke == nil {
+			continue
+		}
+		id := service.CooldownKey(ref.ProviderSlug, ke.Name)
+		if s.st.Cooldown(id) {
+			continue
+		}
+		if hasHealthy && s.st.ProvHealth.IsError(id) {
+			continue
+		}
+		eligible = append(eligible, ke)
+	}
+	// Model flagged: hanya key sehat pertama yang dicoba (tanpa failover key).
+	if singleTry && len(eligible) > 1 {
+		eligible = eligible[:1]
+	}
 
 	// Request masuk: silent re-test key & proxy ber-flag di background
 	// (self-heal), tanpa mengganggu response ini.
 	s.maybeRetestKeys(snap, ref.ProviderSlug, ref.Provider)
-	s.maybeRetestProxies(snap, targets)
+	s.maybeRetestProxies(snap, retestTargets(targets, snap, eligible))
 
-	// Driver: proxy di loop luar (failover antar pool), key di loop dalam.
+	// Driver: key di loop luar (tiap key bisa punya proxy sendiri yang
+	// meng-override proxy provider), target proxy key di loop dalam.
 	tried := 0
 	var lastErr error
-	for _, tgt := range targets {
-		client, cerr := s.pool.ClientFor(tgt.Type, tgt.URL)
-		if cerr != nil {
-			lg.Warn("proxy client failed", "provider", ref.ProviderSlug, "proxy", tgt.Name, "err", cerr.Error())
-			if tgt.Name != "" {
-				s.st.ProxyHealth.SetError(tgt.Name, cerr.Error())
-			}
-			lastErr = cerr
-			continue
-		}
-		run := &upstreamRun{
-			s: s, w: w, r: r, lg: lg, ref: ref, client: client, tgt: tgt,
-			upURL: upURL, upBody: upBody, timeout: timeout, stream: stream,
-			singleTry: singleTry, ring: ring, healthy: hasHealthy,
-			healthModelID: healthModelID, callerHash: callerHash, callerName: callerName,
-		}
-		if run.exec(&tried) == runServed {
+	for _, ke := range eligible {
+		keyTargets, noFallback, terr := service.ResolveKeyProxies(snap, ke, targets)
+		if terr != nil {
+			writeErr(w, http.StatusBadGateway, terr.Error(), "server_error", "bad_gateway")
+			lg.Warn("key proxy resolve failed", "provider", ref.ProviderSlug, "key", ke.Name, "err", terr.Error())
+			lg.Info("req<", "status", 502, "key", ke.Name)
 			return
 		}
-		if run.lastErr != nil {
-			lastErr = run.lastErr
+		for _, tgt := range keyTargets {
+			client, cerr := s.pool.ClientFor(tgt.Type, tgt.URL)
+			if cerr != nil {
+				lg.Warn("proxy client failed", "provider", ref.ProviderSlug, "key", ke.Name, "proxy", tgt.Name, "err", cerr.Error())
+				if tgt.Name != "" {
+					s.st.ProxyHealth.SetError(tgt.Name, cerr.Error())
+				}
+				lastErr = cerr
+				// Key dipatok ke proxy sendiri: gagalkan request, tanpa failover.
+				if noFallback {
+					writeErr(w, http.StatusBadGateway, proxyFailMsg(tgt, cerr), "server_error", "bad_gateway")
+					lg.Info("req<", "status", 502, "key", ke.Name, "proxy", tgt.Name)
+					return
+				}
+				continue
+			}
+			run := &upstreamRun{
+				s: s, w: w, r: r, lg: lg, ref: ref, client: client, tgt: tgt,
+				upURL: upURL, upBody: upBody, timeout: timeout, stream: stream,
+				singleTry: singleTry, ring: []*config.KeyEntry{ke}, healthy: hasHealthy,
+				healthModelID: healthModelID, callerHash: callerHash, callerName: callerName,
+			}
+			res := run.exec(&tried)
+			if res == runServed {
+				return
+			}
+			if run.lastErr != nil {
+				lastErr = run.lastErr
+			}
+			// Key dipatok ke proxy sendiri: pool mati -> gagalkan request,
+			// tanpa failover ke pool maupun key lain.
+			if res == runProxyDead && noFallback {
+				writeErr(w, http.StatusBadGateway, proxyFailMsg(tgt, run.lastErr), "server_error", "bad_gateway")
+				lg.Info("req<", "status", 502, "key", ke.Name, "proxy", tgt.Name)
+				return
+			}
 		}
 	}
 

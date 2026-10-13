@@ -60,7 +60,7 @@ At least one provider is required. The map key is the internal slug; the public 
 | `proxy`       | string | no       | `""` (direct) or a `proxyPools` name; also `"auto"` (try all enabled pools in `order`, failover) or `"round"` (same, rotating start = round robin) |
 | `enabled`     | bool   | yes      | a disabled provider serves nothing; an enabled one needs ≥1 enabled key and ≥1 enabled model                                            |
 | `timeoutSecs` | int    | yes      | must be > 0                                                                                                                             |
-| `keys`        | map    | yes      | ≥1 entry: `{ "name": { "key", "order", "enabled" } }`; `order` ≥ 1 and unique per provider — enabled keys fail over in `order` sequence |
+| `keys`        | map    | yes      | ≥1 entry: `{ "name": { "key", "order", "enabled", "proxy?" } }`; `order` ≥ 1 and unique per provider — enabled keys fail over in `order` sequence. `proxy` is optional (see [Per-key proxy override](#per-key-proxy-override)) |
 | `models`      | map    | yes      | ≥1 entry (see below)                                                                                                                    |
 
 Model entry: `{ "name", "enabled", "limit": { "context", "output" }, "created?" }`. `limit.context` and `limit.output` must be > 0 (internal routing info, not exposed via `/v1/models`). `created` is an optional unix timestamp for the `created` field in `/v1/models` (`0` / absent = omitted). Only enabled models of enabled providers are served, and every `prefix/model` ID must be globally unique.
@@ -89,6 +89,20 @@ Two proxy flavors:
 
 - **`http`** — standard forward proxy (`711Proxy`, `9Proxy`, etc): `http://customer123:your_password@proxy.example.com:8080`. Credentials travel as `Proxy-Authorization`, the TLS session stays end-to-end. Percent-encode the password if it contains `@ : / ? # %` (e.g. `p@ss:wo/rd` → `p%40ss%3Awo%2Frd`).
 - **`relay`** — self-hosted http relay on free serverless hosting (Vercel / Cloudflare Worker / Deno, using the 9router template): `https://your-relay.vercel.app`. The request is sent to the relay URL with `x-relay-target: https://api.provider.com` and `x-relay-path: /v1/...` headers; the relay `fetch()`es upstream from the edge IP. No auto-deploy here — deploy the relay yourself, then point `url` at it.
+
+#### Per-key proxy override
+
+A provider key may pin itself to a proxy, overriding the provider's `proxy` for requests that use that key:
+
+| `keys[].proxy` value | Behavior                                                     |
+| -------------------- | ------------------------------------------------------------ |
+| _(absent)_           | inherit the provider's `proxy` (direct / pool / auto / round) |
+| `""`                 | direct connection, ignoring the provider's proxy             |
+| `"pool-name"`        | that single pool only                                        |
+
+Only `""` (direct) or a pool name are allowed for keys — the `auto` / `round` mode keywords are **rejected** at load (`providers[…].keys[…].proxy: proxy modes are not supported for keys`), and an unknown pool name is rejected too.
+
+A pinned key is **not** load-balanced and has **no fallback**: if the pool itself fails (transport error or `407`, confirmed after 3 consecutive attempts like any pool), the pool is flagged red and the whole request fails with `502` — it does not fall back to the provider's pools nor to the next key. Upstream statuses (`429`/`5xx`) keep the normal key-failover behavior.
 
 ### Flexible numbers & booleans
 
@@ -149,7 +163,7 @@ When stdin is an interactive terminal, BasicRoute opens a fullscreen TUI (gray/b
 | `r`              | reload config                                                      |
 | `q` / `Ctrl+C`   | graceful shutdown                                                  |
 
-Pages: **Api Key** (system key table: `NAMA | KEYS | TOTAL TOKENS | LAST`, green `•` = enabled, gray = disabled, `x` reveals/masks all keys, totals + last-request refresh every 3 s while the page is open, `-` = never used; Explorer-style selectable table), **Logs** (dedicated slog window, follows tail, `End` re-follows), **Provider** (responsive card grid: `•` name, inline `Keys: a/b  Models: c/d`, `Proxy:` showing `direct` / pool name / `auto (n)` / `round (n)` — green `•` = enabled, gray = disabled — → detail with _Basic info_, _Keys_, _Models_ sections, Keys/Models tables Explorer-style selectable, `t` tests the focused row or all selected rows), **Proxy** (table: `NAME | TYPE | ORDER | CLIENTS | URL` termasking, rows sorted by `order` — yellow `•` = testing, green `•` = enabled, gray = disabled, red `•` = flagged error — `t` tests the highlighted pool, `y` tests the selected pools; a red pool is deprioritized on the request path — see failover below).
+Pages: **Api Key** (system key table: `NAMA | KEYS | TOTAL TOKENS | LAST`, green `•` = enabled, gray = disabled, `x` reveals/masks all keys, totals + last-request refresh every 3 s while the page is open, `-` = never used; Explorer-style selectable table), **Logs** (dedicated slog window, follows tail, `End` re-follows), **Provider** (responsive card grid: `•` name, inline `Keys: a/b  Models: c/d`, `Proxy:` showing `direct` / pool name / `auto (n)` / `round (n)` — green `•` = enabled, gray = disabled — → detail with _Basic info_, _Keys_, _Models_ sections, Keys table `NAME | ORDER | COOLDOWN | PROXY | KEY` where `PROXY` shows the effective per-key proxy (`direct` / pool name, dimmed when inherited from the provider), Models table, both Explorer-style selectable, `t` tests the focused row or all selected rows), **Proxy** (table: `NAME | TYPE | ORDER | CLIENTS | URL` termasking, rows sorted by `order` — yellow `•` = testing, green `•` = enabled, gray = disabled, red `•` = flagged error — `t` tests the highlighted pool, `y` tests the selected pools; a red pool is deprioritized on the request path — see failover below).
 
 Provider health flags (memory only, `t` in detail or automatic): while a row is being tested its `•` is yellow, then turns green (ok) or red (error). A red `•` means key/model flagged error; selecting a flagged row shows the full error message at the bottom of the container. A flagged key is skipped by incoming requests while a healthy key exists (last-resort: all flagged keys are still tried) and is silently re-tested in the background (min. 60 s per provider) — recovery clears the flag. A flagged model gets exactly one retry: success clears the flag and serves the request; failure keeps the flag and returns the upstream error. A healthy model that keeps failing is auto-flagged after 3 consecutive non-2xx, non-auth, non-429 responses; any success resets the counter. Auth failures (401/403) flag the key instead of the model.
 
@@ -166,7 +180,7 @@ Piped/non-terminal stdin falls back to the plain line CLI:
 | `system`                  | system detail (host/port/auth/limits/keys)               |
 | `apikey [name]`           | detail of one system key (no arg = same as system)       |
 | `providers`               | table of all providers                                   |
-| `provider <slug\|prefix>` | detail of one provider (keys + models, cooldown status)  |
+| `provider <slug\|prefix>` | detail of one provider (keys with effective proxy + models, cooldown status) |
 | `models [filter]`         | list `prefix/slug` model IDs (optional substring filter) |
 | `proxies`                 | table of all proxy pools (order, type, health) + which providers use them; also lists providers on `auto`/`round` |
 | `proxy <name>`            | detail of one proxy pool                                 |
