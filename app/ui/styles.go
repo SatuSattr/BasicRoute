@@ -12,6 +12,7 @@ var (
 	colSelBg = lipgloss.Color("#1F1F1F") // latar pilihan aktif
 	colGreen = lipgloss.Color("#4ADE80") // indikator enabled / sehat
 	colRed   = lipgloss.Color("#F87171") // indikator error
+	colAmber = lipgloss.Color("#FACC15") // indikator sedang di-test (kuning)
 )
 
 var (
@@ -57,6 +58,7 @@ var (
 	styleDotOn      = lipgloss.NewStyle().Bold(true).Foreground(colGreen)
 	styleDotOff     = lipgloss.NewStyle().Foreground(colDim)
 	styleDotErr     = lipgloss.NewStyle().Bold(true).Foreground(colRed)
+	styleDotTest    = lipgloss.NewStyle().Bold(true).Foreground(colAmber)
 	styleCardSel2   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colText).Padding(0, 1)
 
 	// Detail provider: judul nama, kepala seksi, label vs nilai, pemisah.

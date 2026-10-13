@@ -56,7 +56,7 @@
       "type": "openai",
       "interface": "responses-api",
       "baseUrl": "https://eu.acme.example/v1/",
-      "proxy": "pool-eu",
+      "proxy": "auto",
       "enabled": true,
       "timeoutSecs": 90,
       "keys": {
@@ -89,12 +89,20 @@
     "pool-eu": {
       "type": "http",
       "url": "http://customer123:your_password@proxy.example.com:8080",
+      "order": 1,
       "enabled": true,
     },
     "pool-relay": {
       "type": "relay",
       "url": "https://your-relay.vercel.app",
+      "order": 2,
       "enabled": false,
+    },
+    "pool-us": {
+      "type": "http",
+      "url": "http://customer123:your_password@us.proxy.example.com:8080",
+      "order": 3,
+      "enabled": true,
     },
   },
 }

@@ -2,17 +2,16 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"basicroute/app/config"
@@ -26,6 +25,15 @@ type Server struct {
 	log     *slog.Logger
 	maxBody int64
 	start   time.Time
+
+	// Guard silent re-test key error (satu jalan per provider + interval).
+	retestMu   sync.Mutex
+	retestLast map[string]time.Time
+	retestRun  map[string]bool
+
+	// Guard silent re-test proxy error (satu jalan per pool + interval).
+	proxyRetestLast map[string]time.Time
+	proxyRetestRun  map[string]bool
 }
 
 func New(st *service.Store, pool *service.Pool, log *slog.Logger, maxBodyMB int) *Server {
@@ -42,11 +50,15 @@ func New(st *service.Store, pool *service.Pool, log *slog.Logger, maxBodyMB int)
 		maxBodyMB = 10
 	}
 	return &Server{
-		st:      st,
-		pool:    pool,
-		log:     log,
-		maxBody: int64(maxBodyMB) * 1024 * 1024,
-		start:   time.Now(),
+		st:              st,
+		pool:            pool,
+		log:             log,
+		maxBody:         int64(maxBodyMB) * 1024 * 1024,
+		start:           time.Now(),
+		retestLast:      map[string]time.Time{},
+		retestRun:       map[string]bool{},
+		proxyRetestLast: map[string]time.Time{},
+		proxyRetestRun:  map[string]bool{},
 	}
 }
 
@@ -332,18 +344,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := service.TargetURL(ref.Provider.BaseURL, ref.Provider.Interface)
+	upURL := service.TargetURL(ref.Provider.BaseURL, ref.Provider.Interface)
 
-	proxyType, proxyURL, err := resolveProxy(snap, ref.Provider)
+	// Kandidat proxy: direct / pool / auto / round (urutan + prioritas sehat).
+	targets, err := s.proxyCandidates(snap, ref.ProviderSlug, ref.Provider)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error(), "server_error", "bad_gateway")
 		lg.Warn("proxy resolve failed", "provider", ref.ProviderSlug, "proxy", ref.Provider.Proxy, "err", err.Error())
-		return
-	}
-	client, err := s.pool.ClientFor(proxyType, proxyURL)
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, fmt.Sprintf("proxy %q: %v", ref.Provider.Proxy, err), "server_error", "bad_gateway")
-		lg.Warn("proxy client failed", "provider", ref.ProviderSlug, "proxy", ref.Provider.Proxy, "err", err.Error())
 		return
 	}
 
@@ -352,133 +359,69 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		timeout = 300 * time.Second
 	}
 
-	tried := 0
-	for i, ke := range ring {
+	healthModelID := service.ProvModelID(ref.ProviderSlug, ref.ModelSlug)
+	// Model flagged: satu percobaan saja (key sehat pertama), tanpa failover.
+	// Gagal -> flag dipertahankan, error upstream diteruskan ke requester.
+	singleTry := s.st.ProvHealth.IsError(healthModelID)
+
+	// Key flagged di-skip bila masih ada alternatif sehat; bila semua
+	// flagged (last-resort) tetap dicoba agar tidak outage total.
+	hasHealthy := false
+	for _, ke := range ring {
 		if ke == nil {
 			continue
 		}
-		keyID := service.CooldownKey(ref.ProviderSlug, ke.Name)
-		if s.st.Cooldown(keyID) {
+		id := service.CooldownKey(ref.ProviderSlug, ke.Name)
+		if s.st.Cooldown(id) || s.st.ProvHealth.IsError(id) {
 			continue
 		}
-		tried++
-
-		ctx, cancel := context.WithTimeout(r.Context(), timeout)
-		upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(upBody))
-		if err != nil {
-			cancel()
-			writeErr(w, http.StatusInternalServerError, "cannot build upstream request", "server_error", "")
-			lg.Info("req<", "status", 500)
-			return
-		}
-		service.CopyHeaders(upReq.Header, r.Header)
-		upReq.Header.Set("Content-Type", "application/json")
-		upReq.Header.Set("Authorization", "Bearer "+ke.Key)
-
-		lg.Info("up>", "target", target, "provider", ref.ProviderSlug, "key", ke.Name, "masked", MaskKey(ke.Key))
-		t0 := time.Now()
-		resp, err := client.Do(upReq)
-		if err != nil {
-			el := time.Since(t0)
-			cancel()
-			s.st.MarkCooldown(keyID, 60*time.Second)
-			s.st.Record(ref.ProviderSlug, ref.FullID, el.Milliseconds(), true)
-			lg.Warn("up<", "provider", ref.ProviderSlug, "key", ke.Name, "err", err.Error(), "latencyMs", el.Milliseconds())
-			if service.IsRetryable(0, err) && hasRemaining(s.st, ring, i, ref.ProviderSlug) {
-				continue
-			}
-			if service.IsRetryable(0, err) && tried < len(ring) {
-				continue
-			}
-			writeErr(w, http.StatusBadGateway, "all upstreams failed: "+err.Error(), "server_error", "bad_gateway")
-			lg.Info("req<", "status", 502)
-			return
-		}
-		ttft := time.Since(t0) // header upstream diterima (TTFT aproksimasi)
-		if service.IsRetryable(resp.StatusCode, nil) && hasRemaining(s.st, ring, i, ref.ProviderSlug) {
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
-			cancel()
-			s.st.MarkCooldown(keyID, 60*time.Second)
-			s.st.Record(ref.ProviderSlug, ref.FullID, ttft.Milliseconds(), true)
-			lg.Warn("up<", "provider", ref.ProviderSlug, "key", ke.Name, "status", resp.StatusCode, "retry", true)
-			continue
-		}
-		sse := stream || strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
-		if sse {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
-			w.Header().Set("X-Accel-Buffering", "no")
-		} else if ct := resp.Header.Get("Content-Type"); ct != "" {
-			w.Header().Set("Content-Type", ct)
-		}
-		w.WriteHeader(resp.StatusCode)
-		cap := newCapture(4 << 20) // simpan ekor s/d 4MB untuk ekstrak usage
-		var n int64
-		if sse {
-			if fl, ok := w.(http.Flusher); ok {
-				fl.Flush()
-				n, _ = io.Copy(flushWriter{w: io.MultiWriter(w, cap), f: fl}, resp.Body)
-			} else {
-				n, _ = io.Copy(io.MultiWriter(w, cap), resp.Body)
-			}
-		} else {
-			n, _ = io.Copy(io.MultiWriter(w, cap), resp.Body)
-		}
-		resp.Body.Close()
-		cancel()
-		el := time.Since(t0)
-		ok2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
-		s.st.Record(ref.ProviderSlug, ref.FullID, el.Milliseconds(), !ok2xx)
-		if ok2xx && s.st != nil && s.st.Usage != nil && callerHash != "" {
-			if toks := extractTotalTokens(cap.Bytes(), sse); toks > 0 {
-				s.st.Usage.Add(callerHash, callerName, toks)
-			}
-		}
-		// Request sukses lewat proxy -> proxy dianggap aktif lagi (hijau).
-		if ok2xx && s.st != nil && s.st.ProxyHealth != nil {
-			if name := strings.TrimSpace(ref.Provider.Proxy); name != "" {
-				s.st.ProxyHealth.SetOK(name)
-			}
-		}
-		lg.Info("req<", "status", resp.StatusCode, "bytes", n, "latencyMs", el.Milliseconds(), "ttftMs", ttft.Milliseconds(), "key", ke.Name)
-		return
+		hasHealthy = true
+		break
 	}
+
+	// Request masuk: silent re-test key & proxy ber-flag di background
+	// (self-heal), tanpa mengganggu response ini.
+	s.maybeRetestKeys(snap, ref.ProviderSlug, ref.Provider)
+	s.maybeRetestProxies(snap, targets)
+
+	// Driver: proxy di loop luar (failover antar pool), key di loop dalam.
+	tried := 0
+	var lastErr error
+	for _, tgt := range targets {
+		client, cerr := s.pool.ClientFor(tgt.Type, tgt.URL)
+		if cerr != nil {
+			lg.Warn("proxy client failed", "provider", ref.ProviderSlug, "proxy", tgt.Name, "err", cerr.Error())
+			if tgt.Name != "" {
+				s.st.ProxyHealth.SetError(tgt.Name, cerr.Error())
+			}
+			lastErr = cerr
+			continue
+		}
+		run := &upstreamRun{
+			s: s, w: w, r: r, lg: lg, ref: ref, client: client, tgt: tgt,
+			upURL: upURL, upBody: upBody, timeout: timeout, stream: stream,
+			singleTry: singleTry, ring: ring, healthy: hasHealthy,
+			healthModelID: healthModelID, callerHash: callerHash, callerName: callerName,
+		}
+		if run.exec(&tried) == runServed {
+			return
+		}
+		if run.lastErr != nil {
+			lastErr = run.lastErr
+		}
+	}
+
 	if tried == 0 {
 		writeErr(w, http.StatusServiceUnavailable, "all keys cooling down, retry shortly", "server_error", "all_keys_cooling_down")
 		lg.Info("req<", "status", 503, "provider", ref.ProviderSlug)
 		return
 	}
-	writeErr(w, http.StatusBadGateway, "all upstreams failed", "server_error", "bad_gateway")
+	msg := "all upstreams failed"
+	if lastErr != nil {
+		msg += ": " + lastErr.Error()
+	}
+	writeErr(w, http.StatusBadGateway, msg, "server_error", "bad_gateway")
 	lg.Info("req<", "status", 502)
-}
-
-func resolveProxy(snap *config.Snapshot, prov *config.Provider) (proxyType, proxyURL string, err error) {
-	if prov == nil || strings.TrimSpace(prov.Proxy) == "" {
-		return "", "", nil
-	}
-	name := strings.TrimSpace(prov.Proxy)
-	p, ok := snap.Raw.ProxyPools[name]
-	if !ok || p == nil {
-		return "", "", fmt.Errorf("proxy pool %q not found", name)
-	}
-	if !p.Enabled {
-		return "", "", fmt.Errorf("proxy pool %q disabled", name)
-	}
-	return p.Type, strings.TrimSpace(p.URL), nil
-}
-
-func hasRemaining(st *service.Store, ring []*config.KeyEntry, cur int, provSlug string) bool {
-	for _, ke := range ring[cur+1:] {
-		if ke == nil {
-			continue
-		}
-		if !st.Cooldown(service.CooldownKey(provSlug, ke.Name)) {
-			return true
-		}
-	}
-	return false
 }
 
 type flushWriter struct {

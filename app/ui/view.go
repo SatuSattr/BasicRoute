@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -85,7 +86,7 @@ func (m Model) View() string {
 		if f.pg == pgProviders {
 			sb.WriteString(m.providersGridView(f))
 		} else {
-			sb.WriteString(m.proxiesGridView(f))
+			sb.WriteString(m.proxiesTableView(f))
 		}
 	case pgProvider:
 		sb.WriteString("\n")
@@ -158,7 +159,7 @@ func (m Model) homeView() string {
 			sb.WriteString(styleItemSel.Width(m.width).Render(row))
 		} else {
 			sb.WriteString(styleItem.Width(m.width).Render(
-				styleBullet.Render("●")+"  "+it.label,
+				styleBullet.Render("●") + "  " + it.label,
 			))
 		}
 		if i < len(homeMenu)-1 {
@@ -211,9 +212,9 @@ func (m Model) pageTitle(f frame) string {
 type lineKind int
 
 const (
-	lkBody lineKind = iota // teks polos
-	lkLog                  // log (warna per level)
-	lkSelect               // baris pilihan (ada 1 yang disorot)
+	lkBody   lineKind = iota // teks polos
+	lkLog                    // log (warna per level)
+	lkSelect                 // baris pilihan (ada 1 yang disorot)
 )
 
 // pageLines mengembalikan baris konten penuh (plain, belum dipotong).
@@ -249,8 +250,40 @@ func (m Model) pageLines(f frame) (lines []string, kind lineKind, selectIdx int,
 	return nil, lkBody, -1, nil
 }
 
+// ago memformat unix menjadi relative-time ("5 seconds ago").
+// ts<=0 (belum pernah) → "-".
+func ago(ts int64) string {
+	if ts <= 0 {
+		return "-"
+	}
+	d := time.Now().Unix() - ts
+	if d < 0 {
+		d = 0
+	}
+	plural := func(n int64, unit string) string {
+		if n == 1 {
+			return fmt.Sprintf("1 %s ago", unit)
+		}
+		return fmt.Sprintf("%d %ss ago", n, unit)
+	}
+	switch {
+	case d < 60:
+		return plural(d, "second")
+	case d < 3600:
+		return plural(d/60, "minute")
+	case d < 86400:
+		return plural(d/3600, "hour")
+	case d < 30*86400:
+		return plural(d/86400, "day")
+	case d < 365*86400:
+		return plural(d/(30*86400), "month")
+	default:
+		return plural(d/(365*86400), "year")
+	}
+}
+
 // apiKeyRows: baris data per system key untuk dipakai pageLines/scroll.
-// Format kolom: nama | keys | total tokens (dipakai juga oleh apiKeysView).
+// Format kolom: nama | keys | total tokens | last (dipakai juga oleh apiKeysView).
 // reveal=true menampilkan key jelas, false termasking.
 // Mengembalikan juga status enabled per baris untuk warna dot.
 func (m Model) apiKeyRows(reveal bool) ([]string, []bool) {
@@ -259,10 +292,10 @@ func (m Model) apiKeyRows(reveal bool) ([]string, []bool) {
 	if snap == nil || snap.Raw == nil {
 		return nil, nil
 	}
-	nW, kW := runeLen("NAMA"), runeLen("KEYS")
+	nW, kW, tW, lW := runeLen("NAMA"), runeLen("KEYS"), runeLen("TOTAL TOKENS"), runeLen("LAST")
 	type row struct {
-		name, shown, total string
-		on                 bool
+		name, shown, total, last string
+		on                       bool
 	}
 	rows := make([]row, 0, len(names))
 	for _, n := range names {
@@ -278,18 +311,21 @@ func (m Model) apiKeyRows(reveal bool) ([]string, []bool) {
 			}
 			hash = sysKeyHash(k.Key)
 		}
-		rows = append(rows, row{name: n, shown: shown, total: cli.FormatTokens(m.apiUsageTotal(hash)), on: on})
+		rows = append(rows, row{name: n, shown: shown, total: cli.FormatTokens(m.apiUsageTotal(hash)), last: ago(m.apiUsageLastUnix(hash)), on: on})
 	}
 	for _, r := range rows {
 		nW = max(nW, runeLen(r.name))
 		kW = max(kW, runeLen(r.shown))
+		tW = max(tW, runeLen(r.total))
+		lW = max(lW, runeLen(r.last))
 	}
 	nW += 2
 	kW += 2
+	tW += 2
 	out := make([]string, 0, len(rows))
 	dots := make([]bool, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, "•  "+padRight(r.name, nW)+padRight(r.shown, kW)+r.total)
+		out = append(out, "• "+padRight(r.name, nW)+padRight(r.shown, kW)+padRight(r.total, tW)+r.last)
 		dots = append(dots, r.on)
 	}
 	return out, dots
@@ -304,19 +340,19 @@ func (m Model) apiKeysView(f frame) string {
 	names := m.sysKeyNames()
 	snap := m.deps.Store.Get()
 	if snap == nil || snap.Raw == nil {
-		return styleWin.Width(m.width - 2).Render(styleBody.Render("(snapshot not ready)")) + "\n"
+		return styleWin.Width(m.width-2).Render(styleBody.Render("(snapshot not ready)")) + "\n"
 	}
 	if len(names) == 0 {
 		body := []string{styleBody.Render("(no api keys yet)")}
 		for len(body) < vp {
 			body = append(body, "")
 		}
-		return styleWin.Width(m.width - 2).Render(strings.Join(body, "\n")) + "\n"
+		return styleWin.Width(m.width-2).Render(strings.Join(body, "\n")) + "\n"
 	}
-	nW, kW := runeLen("NAMA"), runeLen("KEYS")
+	nW, kW, tW := runeLen("NAMA"), runeLen("KEYS"), runeLen("TOTAL TOKENS")
 	type row struct {
-		name, shown, total string
-		on                 bool
+		name, shown, total, last string
+		on                       bool
 	}
 	data := make([]row, 0, len(names))
 	for _, n := range names {
@@ -332,17 +368,19 @@ func (m Model) apiKeysView(f frame) string {
 			}
 			hash = sysKeyHash(k.Key)
 		}
-		data = append(data, row{name: n, shown: shown, total: cli.FormatTokens(m.apiUsageTotal(hash)), on: on})
+		data = append(data, row{name: n, shown: shown, total: cli.FormatTokens(m.apiUsageTotal(hash)), last: ago(m.apiUsageLastUnix(hash)), on: on})
 	}
 	for _, r := range data {
 		nW = max(nW, runeLen(r.name))
 		kW = max(kW, runeLen(r.shown))
+		tW = max(tW, runeLen(r.total))
 	}
 	nW += 2
 	kW += 2
+	tW += 2
 
 	header := dline{[]dseg{
-		{padRight("NAMA", nW+2) + padRight("KEYS", kW) + "TOTAL TOKENS", styleDetLbl},
+		{padRight("NAMA", nW+2) + padRight("KEYS", kW) + padRight("TOTAL TOKENS", tW) + "LAST", styleDetLbl},
 	}}.render(inner)
 
 	// Body scroll atas data saja (header fixed).
@@ -359,23 +397,27 @@ func (m Model) apiKeysView(f frame) string {
 		if r.on {
 			ds = styleDotOn
 		}
-		plain := "•  " + padRight(r.name, nW) + padRight(r.shown, kW) + r.total
+		plain := "• " + padRight(r.name, nW) + padRight(r.shown, kW) + padRight(r.total, tW) + r.last
 		plain = trunc(plain, inner)
-		if idx == f.cursor {
-			vis = append(vis, ds.Render("•")+"  "+styleItemSel.Width(inner-3).Render(strings.TrimPrefix(plain, "•  ")))
+		if idx == f.cursor || f.sel[idx] {
+			vis = append(vis, ds.Render("• ")+styleItemSel.Width(inner-2).Render(strings.TrimPrefix(plain, "• ")))
 			continue
 		}
 		vis = append(vis, dline{[]dseg{
 			{"• ", ds},
 			{padRight(r.name, nW), styleDetVal},
 			{padRight(r.shown, kW), styleDetVal},
-			{r.total, styleDetVal},
+			{padRight(r.total, tW), styleDetVal},
+			{r.last, styleDetVal},
 		}}.render(inner))
+	}
+	if nsel := countSel(f.sel); nsel > 0 {
+		vis = append(vis, styleFooter.Render(fmt.Sprintf("%d api keys selected", nsel)))
 	}
 	for len(vis) < vp {
 		vis = append(vis, "")
 	}
-	return styleWin.Width(m.width - 2).Render(strings.Join(vis, "\n")) + "\n"
+	return styleWin.Width(m.width-2).Render(strings.Join(vis, "\n")) + "\n"
 }
 
 // windowView: konten dalam window border terpisah, di-scroll + dipotong.
@@ -429,12 +471,12 @@ func (m Model) windowView(f frame) string {
 			}
 			if real == sel {
 				if withDots {
-					styled = append(styled, ds.Render("•")+"  "+styleItemSel.Width(inner-3).Render(strings.TrimPrefix(ln, "•  ")))
+					styled = append(styled, ds.Render("• ")+styleItemSel.Width(inner-2).Render(strings.TrimPrefix(ln, "• ")))
 				} else {
 					styled = append(styled, styleItemSel.Width(inner).Render("●  "+ln))
 				}
 			} else if withDots {
-				styled = append(styled, ds.Render("•")+"  "+styleItem.Render(strings.TrimPrefix(ln, "•  ")))
+				styled = append(styled, ds.Render("• ")+styleItem.Render(strings.TrimPrefix(ln, "• ")))
 			} else {
 				styled = append(styled, styleItem.Render(styleBullet.Render("●")+"  "+ln))
 			}
@@ -460,10 +502,11 @@ func (m Model) scrollIndicator(f frame) string {
 		n = provRows(len(m.provCards()), m.provCols(len(m.provCards())))
 		vp = m.provVisRows()
 	case pgProxies:
-		n = provRows(len(m.proxyCards()), m.proxyCols(len(m.proxyCards())))
-		vp = m.proxyVisRows()
+		// Header fixed 1 baris, body = vp-1 (seperti tabel Api Key).
+		n = len(m.poolNames()) + 1
 	case pgProvider:
-		n = len(m.providerDetail(f))
+		lines, _, _ := m.providerDetail(f)
+		n = len(lines)
 	case pgAPIKeys:
 		// Header fixed 1 baris, body = vp-1.
 		n = len(m.sysKeyNames()) + 1
@@ -553,24 +596,33 @@ func (m Model) footerView() string {
 		)
 	case pgAPIKeys:
 		return hintLine(
-			"↑↓", "select",
+			"↑↓", "move",
+			"shift+↑↓", "extend",
 			"x", "show/hide",
 			"Esc", "back",
 			"/", "command",
 		)
 	case pgProvider:
-		return hintLine(
-			"↑↓", "scroll",
+		base := hintLine(
+			"↑↓", "move",
+			"shift+↑↓", "extend",
+			"t", "test sel",
 			"Esc", "back",
 			"/", "command",
 		)
+		_, keyLines, _ := m.providerDetail(f)
+		if lbl := provSelLabel(len(keyLines), f.sel); lbl != "" {
+			base = strings.TrimSuffix(base, "\n") + styleFooter.Render("   ") + styleFooter.Render(lbl) + "\n"
+		}
+		return base
 	case pgProxies:
 		return hintLine(
-			"←→↑↓", "select",
+			"↑↓", "move",
+			"shift+↑↓", "extend",
 			"Enter", "details",
-			"t", "test",
+			"t", "test row",
+			"y", "test sel",
 			"Esc", "back",
-			"/", "command",
 		)
 	default:
 		return hintLine(

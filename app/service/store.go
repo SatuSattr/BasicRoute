@@ -12,6 +12,20 @@ func CooldownKey(providerSlug, keyName string) string {
 	return providerSlug + "|" + keyName
 }
 
+// ModelAutoFlagThreshold: jumlah gagal response beruntun (non-2xx non-auth,
+// non-429) sebelum model di-flag error otomatis.
+const ModelAutoFlagThreshold = 3
+
+// ProxyFailThreshold: jumlah gagal proxy beruntun (transport error / 407)
+// sebelum pool di-flag error dan request pindah ke pool berikutnya.
+const ProxyFailThreshold = 3
+
+// modelFailState menghitung consecutive failures satu model (FullID).
+type modelFailState struct {
+	n    int
+	last string
+}
+
 type Store struct {
 	snap atomic.Pointer[config.Snapshot]
 
@@ -21,6 +35,10 @@ type Store struct {
 
 	// ProxyHealth menandai proxy pool yang error (memory only).
 	ProxyHealth *ProxyHealth
+
+	// ProvHealth menandai key/model provider yang error + pesan terakhir
+	// (memory only). Dipakai indikator merah + pesan detail di TUI.
+	ProvHealth *ProvHealth
 
 	mu       sync.RWMutex
 	hits     map[string]uint64
@@ -35,6 +53,20 @@ type Store struct {
 	cooldownMu sync.Mutex
 	cooldown   map[string]time.Time
 
+	// modelFails menghitung consecutive gagal per model (FullID) untuk
+	// auto-flag. Sukses me-reset counter (lihat NoteModelResult).
+	modelFailMu sync.Mutex
+	modelFails  map[string]modelFailState
+
+	// proxyFails menghitung consecutive gagal per pool proxy (nama) untuk
+	// auto-flag. Sukses me-reset counter (lihat NoteProxyResult).
+	proxyFailMu sync.Mutex
+	proxyFails  map[string]int
+
+	// roundRobin menyimpan kursor rotasi per provider untuk mode "round".
+	rrMu       sync.Mutex
+	roundRobin map[string]uint64
+
 	gen atomic.Uint64
 }
 
@@ -45,7 +77,11 @@ func NewStore(s *config.Snapshot) *Store {
 		errs:        map[string]uint64{},
 		latSum:      map[string]int64{},
 		latCount:    map[string]uint64{},
+		modelFails:  map[string]modelFailState{},
+		proxyFails:  map[string]int{},
+		roundRobin:  map[string]uint64{},
 		ProxyHealth: NewProxyHealth(),
+		ProvHealth:  NewProvHealth(),
 	}
 	if s != nil {
 		st.snap.Store(s)
@@ -155,10 +191,76 @@ func (st *Store) MarkCooldown(key string, d time.Duration) {
 	st.cooldown[key] = time.Now().Add(d)
 }
 
+// NoteModelResult mencatat hasil satu response upstream untuk model
+// (FullID): ok=true mereset counter, ok=false menaikkan counter.
+// Mengembalikan jumlah consecutive failures saat ini (0 bila ok).
+func (st *Store) NoteModelResult(fullID string, ok bool, lastErr string) int {
+	if st == nil || fullID == "" {
+		if ok {
+			return 0
+		}
+		return 1
+	}
+	st.modelFailMu.Lock()
+	defer st.modelFailMu.Unlock()
+	if st.modelFails == nil {
+		st.modelFails = map[string]modelFailState{}
+	}
+	if ok {
+		delete(st.modelFails, fullID)
+		return 0
+	}
+	fs := st.modelFails[fullID]
+	fs.n++
+	if lastErr != "" {
+		fs.last = lastErr
+	}
+	st.modelFails[fullID] = fs
+	return fs.n
+}
+
+// NoteProxyResult mencatat hasil satu percobaan lewat pool proxy:
+// ok=true mereset counter, ok=false menaikkan counter. Mengembalikan
+// jumlah consecutive failures saat ini (0 bila ok).
+func (st *Store) NoteProxyResult(name string, ok bool) int {
+	if st == nil || name == "" {
+		if ok {
+			return 0
+		}
+		return 1
+	}
+	st.proxyFailMu.Lock()
+	defer st.proxyFailMu.Unlock()
+	if st.proxyFails == nil {
+		st.proxyFails = map[string]int{}
+	}
+	if ok {
+		delete(st.proxyFails, name)
+		return 0
+	}
+	st.proxyFails[name]++
+	return st.proxyFails[name]
+}
+
+// NextRoundRobin mengembalikan index awal (0..n-1) untuk mode "round" dan
+// memajukan kursor rotasi provider. n<=0 -> 0.
+func (st *Store) NextRoundRobin(providerSlug string, n int) int {
+	if st == nil || n <= 0 {
+		return 0
+	}
+	st.rrMu.Lock()
+	defer st.rrMu.Unlock()
+	if st.roundRobin == nil {
+		st.roundRobin = map[string]uint64{}
+	}
+	cur := st.roundRobin[providerSlug]
+	st.roundRobin[providerSlug] = cur + 1
+	return int(cur % uint64(n))
+}
+
 func statKey(provider, model string) string {
 	return provider + "|" + model
 }
-
 func (st *Store) Record(provider, model string, ms int64, err bool) {
 	if ms < 0 {
 		ms = 0

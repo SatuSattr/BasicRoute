@@ -1,30 +1,73 @@
 package service
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
-// ProxyHealth menandai proxy pool yang gagal di memory saja (tidak persisten).
-// Dipakai indikator UI: error = merah, selain itu hijau/abu sesuai enabled.
-// Hanya proxy yang di-test manual atau yang baru sukses dilewati request
-// yang mengubah status di sini.
+// ProxyHealth menandai proxy pool yang gagal di memory saja (tidak persisten),
+// beserta pesan error terakhirnya untuk ditampilkan di TUI/CLI. Dipakai
+// indikator UI: error = merah, selain itu hijau/abu sesuai enabled. Status
+// berubah dari test manual maupun dari kegagalan/keberhasilan request nyata.
 type ProxyHealth struct {
-	mu  sync.RWMutex
-	bad map[string]bool // nama pool -> true bila diketahui error
+	mu      sync.RWMutex
+	bad     map[string]proxyErr // nama pool -> error terakhir
+	testing map[string]bool     // nama pool -> sedang di-test (kuning)
+}
+
+type proxyErr struct {
+	Msg string
+	At  int64 // unix terakhir SetError
 }
 
 func NewProxyHealth() *ProxyHealth {
-	return &ProxyHealth{bad: map[string]bool{}}
+	return &ProxyHealth{bad: map[string]proxyErr{}, testing: map[string]bool{}}
 }
 
-// SetError menandai pool sedang error.
-func (p *ProxyHealth) SetError(name string) {
+// SetTesting menandai pool sedang di-test (indikator kuning).
+func (p *ProxyHealth) SetTesting(name string) {
+	if p == nil || name == "" {
+		return
+	}
+	p.mu.Lock()
+	if p.testing == nil {
+		p.testing = map[string]bool{}
+	}
+	p.testing[name] = true
+	p.mu.Unlock()
+}
+
+// ClearTesting menghapus tanda sedang di-test tanpa mengubah error.
+func (p *ProxyHealth) ClearTesting(name string) {
+	if p == nil || name == "" {
+		return
+	}
+	p.mu.Lock()
+	delete(p.testing, name)
+	p.mu.Unlock()
+}
+
+// IsTesting melaporkan apakah pool sedang di-test.
+func (p *ProxyHealth) IsTesting(name string) bool {
+	if p == nil || name == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.testing[name]
+}
+
+// SetError menandai pool sedang error beserta pesannya.
+func (p *ProxyHealth) SetError(name, msg string) {
 	if p == nil || name == "" {
 		return
 	}
 	p.mu.Lock()
 	if p.bad == nil {
-		p.bad = map[string]bool{}
+		p.bad = map[string]proxyErr{}
 	}
-	p.bad[name] = true
+	p.bad[name] = proxyErr{Msg: msg, At: time.Now().Unix()}
+	delete(p.testing, name) // hasil sudah keluar: kuning -> merah
 	p.mu.Unlock()
 }
 
@@ -35,6 +78,7 @@ func (p *ProxyHealth) SetOK(name string) {
 	}
 	p.mu.Lock()
 	delete(p.bad, name)
+	delete(p.testing, name) // hasil sudah keluar: kuning -> hijau
 	p.mu.Unlock()
 }
 
@@ -45,19 +89,30 @@ func (p *ProxyHealth) IsError(name string) bool {
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.bad[name]
+	_, ok := p.bad[name]
+	return ok
 }
 
-// Snapshot menyalin status error (nama -> true) untuk pembaca lain.
-func (p *ProxyHealth) Snapshot() map[string]bool {
-	if p == nil {
-		return map[string]bool{}
+// ErrMsg mengembalikan pesan error terakhir untuk pool ("" bila tidak flagged).
+func (p *ProxyHealth) ErrMsg(name string) string {
+	if p == nil || name == "" {
+		return ""
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	out := make(map[string]bool, len(p.bad))
+	return p.bad[name].Msg
+}
+
+// Snapshot menyalin status error (nama -> pesan) untuk pembaca lain.
+func (p *ProxyHealth) Snapshot() map[string]string {
+	if p == nil {
+		return map[string]string{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]string, len(p.bad))
 	for k, v := range p.bad {
-		out[k] = v
+		out[k] = v.Msg
 	}
 	return out
 }

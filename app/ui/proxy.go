@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"basicroute/app/cli"
 	"basicroute/app/config"
 )
 
@@ -17,24 +18,21 @@ func proxyTypeLabel(t string) string {
 	return config.ProxyTypeHTTP
 }
 
-// ---- daftar proxy sebagai kartu (grid responsif, mirip provider) ----
+// ---- daftar proxy sebagai tabel (seperti halaman Api Key) ----
 
-const (
-	proxyCardW   = 26 // lebar total kartu, termasuk border
-	proxyCardGap = 2  // spasi antar kartu
-	proxyCardH   = 4  // tinggi kartu: 2 baris isi + 2 border
-)
-
-// proxyCard adalah ringkasan satu proxy pool untuk kartu.
+// proxyCard adalah ringkasan satu proxy pool untuk satu baris tabel.
 type proxyCard struct {
 	name    string // nama pool
+	order   int    // urutan pemakaian mode auto/round
 	clients int    // jumlah provider yang memakai pool ini
 	enabled bool   // pool enabled
 	err     bool   // ditandai error dari hasil test (memory)
+	testing bool   // sedang di-test (memory, indikator kuning)
 	typ     string // tipe pool: "http" (forward) atau "relay"
+	url     string // URL termasking (password disamarkan)
 }
 
-// proxyCards membaca ringkasan pool live dari Store, terurut nama.
+// proxyCards membaca ringkasan pool live dari Store, terurut urutan pemakaian.
 func (m Model) proxyCards() []proxyCard {
 	snap := m.deps.Store.Get()
 	if snap == nil || snap.Raw == nil {
@@ -45,7 +43,7 @@ func (m Model) proxyCards() []proxyCard {
 		if p == nil {
 			continue
 		}
-		if name := strings.TrimSpace(p.Proxy); name != "" {
+		if name := strings.TrimSpace(p.Proxy); name != "" && !config.IsProxyMode(name) {
 			used[name]++
 		}
 	}
@@ -56,23 +54,31 @@ func (m Model) proxyCards() []proxyCard {
 			continue
 		}
 		errFlag := false
+		testing := false
 		if m.deps.Store.ProxyHealth != nil {
 			errFlag = m.deps.Store.ProxyHealth.IsError(n)
+			testing = m.deps.Store.ProxyHealth.IsTesting(n)
 		}
 		out = append(out, proxyCard{
 			name:    n,
+			order:   int(pp.Order),
 			clients: used[n],
 			enabled: bool(pp.Enabled),
 			err:     errFlag,
+			testing: testing,
 			typ:     proxyTypeLabel(pp.Type),
+			url:     cli.MaskProxyURL(strings.TrimSpace(pp.URL)),
 		})
 	}
 	return out
 }
 
-// proxyDot memilih style dot: abu (disabled), merah (error), hijau (sehat).
+// proxyDot memilih style dot: kuning (sedang di-test), abu (disabled),
+// merah (error), hijau (sehat).
 func proxyDot(c proxyCard) lipgloss.Style {
 	switch {
+	case c.testing:
+		return styleDotTest
 	case !c.enabled:
 		return styleDotOff
 	case c.err:
@@ -82,151 +88,103 @@ func proxyDot(c proxyCard) lipgloss.Style {
 	}
 }
 
-// proxyCols menghitung jumlah kolom dari lebar terminal (responsif).
-func (m Model) proxyCols(n int) int {
-	if n <= 0 {
-		return 1
-	}
-	cols := (m.innerW() + proxyCardGap) / (proxyCardW + proxyCardGap)
-	if cols < 1 {
-		cols = 1
-	}
-	if cols > n {
-		cols = n
-	}
-	return cols
-}
-
-// proxyVisRows: baris kartu yang muat di viewport (sisakan 2 baris info).
-func (m Model) proxyVisRows() int {
-	vr := (m.viewportH() - 1) / (proxyCardH + 1)
-	if vr < 1 {
-		vr = 1
-	}
-	return vr
-}
-
-// renderProxyCard menggambar satu kartu (lebar tetap proxyCardW).
-// sel = kartu terpilih sebagai cursor (nama underline), picked = ikut terseleksi.
-func (m Model) renderProxyCard(c proxyCard, sel, picked bool) string {
-	w := proxyCardW - 4 // isi: border 2 + padding 2
-
-	ns := styleCardName
-	if !c.enabled && !sel {
-		ns = styleCardNameOD
-	}
-	if sel {
-		ns = styleCardNameSl
-	}
-	ds := proxyDot(c)
-	l1 := dline{[]dseg{{"• ", ds}, {c.name, ns}}}.render(w)
-	l2 := dline{[]dseg{
-		{"Clients: ", styleCardLbl},
-		{fmt.Sprint(c.clients), styleCardVal},
-	}}.render(w)
-
-	body := strings.Join([]string{l1, l2}, "\n")
-	st := styleCard.Width(proxyCardW - 2)
-	switch {
-	case sel:
-		st = styleCardSel.Width(proxyCardW - 2)
-	case picked:
-		st = styleCardSel2.Width(proxyCardW - 2)
-	}
-	_ = m
-	return st.Render(body)
-}
-
-// proxiesGridView: kartu-kartu dalam window, navigasi 2D.
-func (m Model) proxiesGridView(f frame) string {
-	cards := m.proxyCards()
+// proxiesTableView: tabel NAME | TYPE | ORDER | CLIENTS | URL ala halaman Api Key.
+// Header fixed, body di-scroll. Baris cursor + multi-select di-highlight
+// (dot hijau/abu/merah tetap terlihat). Seleksi model anchor Explorer.
+func (m Model) proxiesTableView(f frame) string {
+	inner := m.innerW()
 	vp := m.viewportH()
-	var body []string
-
+	cards := m.proxyCards()
 	if len(cards) == 0 {
-		body = []string{styleBody.Render("(empty — all providers direct)")}
-	} else {
-		cols := m.proxyCols(len(cards))
-		rows := provRows(len(cards), cols)
-		vis := m.proxyVisRows()
-		start := clamp(f.scroll, 0, imax(rows-vis, 0))
-		end := start + vis
-		if end > rows {
-			end = rows
-		}
-		gap := strings.Repeat(" ", proxyCardGap)
-		for r := start; r < end; r++ {
-			var parts []string
-			for c := 0; c < cols; c++ {
-				idx := r*cols + c
-				if idx >= len(cards) {
-					break
-				}
-				if len(parts) > 0 {
-					parts = append(parts, gap)
-				}
-				parts = append(parts, m.renderProxyCard(cards[idx], idx == f.cursor, f.sel[idx]))
-			}
-			body = append(body, strings.Split(lipgloss.JoinHorizontal(lipgloss.Top, parts...), "\n")...)
-			if r < end-1 {
-				body = append(body, "")
-			}
-		}
-		if f.cursor >= 0 && f.cursor < len(cards) {
-			sel := cards[f.cursor]
-			info := "▸ " + sel.name + "  ·  " + sel.typ + "  ·  Clients: " + fmt.Sprint(sel.clients)
-			switch {
-			case !sel.enabled:
-				info += "  ·  disabled"
-			case sel.err:
-				info += "  ·  error"
-			default:
-				info += "  ·  ok"
-			}
+		body := []string{styleBody.Render("(empty — all providers direct)")}
+		for len(body) < vp {
 			body = append(body, "")
-			body = append(body, styleFooter.Render(info))
 		}
+		return styleWin.Width(m.width-2).Render(strings.Join(body, "\n")) + "\n"
 	}
+	nW, tW, oW, cW, uW := runeLen("NAME"), runeLen("TYPE"), runeLen("ORDER"), runeLen("CLIENTS"), runeLen("URL")
+	for _, c := range cards {
+		nW = max(nW, runeLen(c.name))
+		tW = max(tW, runeLen(c.typ))
+		oW = max(oW, runeLen(fmt.Sprint(c.order)))
+		cW = max(cW, runeLen(fmt.Sprint(c.clients)))
+		uW = max(uW, runeLen(c.url))
+	}
+	nW += 2
+	tW += 2
+	oW += 2
+	cW += 2
 
-	for len(body) < vp {
-		body = append(body, "")
+	header := dline{[]dseg{
+		{padRight("NAME", nW+2) + padRight("TYPE", tW) + padRight("ORDER", oW) + padRight("CLIENTS", cW) + "URL", styleDetLbl},
+	}}.render(inner)
+
+	// Body scroll atas data saja (header fixed).
+	start := clamp(f.scroll, 0, maxScroll(len(cards), vp-1))
+	end := start + (vp - 1)
+	if end > len(cards) {
+		end = len(cards)
 	}
-	return styleWin.Width(m.width - 2).Render(strings.Join(body, "\n")) + "\n"
+	vis := make([]string, 0, vp)
+	vis = append(vis, header)
+	for idx := start; idx < end; idx++ {
+		c := cards[idx]
+		ds := proxyDot(c)
+		plain := "• " + padRight(c.name, nW) + padRight(c.typ, tW) + padRight(fmt.Sprint(c.order), oW) + padRight(fmt.Sprint(c.clients), cW) + c.url
+		plain = trunc(plain, inner)
+		if idx == f.cursor || f.sel[idx] {
+			vis = append(vis, ds.Render("• ")+styleItemSel.Width(inner-2).Render(strings.TrimPrefix(plain, "• ")))
+			continue
+		}
+		vis = append(vis, dline{[]dseg{
+			{"• ", ds},
+			{padRight(c.name, nW), styleDetVal},
+			{padRight(c.typ, tW), styleDetVal},
+			{padRight(fmt.Sprint(c.order), oW), styleDetVal},
+			{padRight(fmt.Sprint(c.clients), cW), styleDetVal},
+			{c.url, styleDetVal},
+		}}.render(inner))
+	}
+	if nsel := countSel(f.sel); nsel > 0 {
+		vis = append(vis, styleFooter.Render(fmt.Sprintf("%d proxy selected", nsel)))
+	}
+	for len(vis) < vp {
+		vis = append(vis, "")
+	}
+	return styleWin.Width(m.width-2).Render(strings.Join(vis, "\n")) + "\n"
 }
 
-// moveProxyCursor memindahkan cursor grid ala navigasi kartu (wrap-around).
-func moveProxyCursor(cursor int, key string, n, cols int) int {
-	if n <= 0 {
-		return 0
+// ensureProxyVisible menggeser scroll tabel agar cursor terlihat.
+func (m *Model) ensureProxyVisible() {
+	f := m.cur()
+	if f.pg != pgProxies {
+		return
 	}
-	switch key {
-	case "left", "h":
-		return (cursor + n - 1) % n
-	case "right", "l":
-		return (cursor + 1) % n
-	case "up", "k":
-		c := cursor
-		if c-cols >= 0 {
-			c -= cols
-		} else {
-			for c+cols < n {
-				c += cols
-			}
-		}
-		return c
-	case "down", "j":
-		c := cursor
-		if c+cols < n {
-			c += cols
-		} else {
-			c = c % cols
-			if c >= n {
-				c = n - 1
-			}
-		}
-		return c
+	n := len(m.proxyCards())
+	if n == 0 {
+		return
 	}
-	return cursor
+	vp := m.viewportH() - 1
+	if vp < 1 {
+		vp = 1
+	}
+	if f.cursor < f.scroll {
+		f.scroll = f.cursor
+	} else if f.cursor >= f.scroll+vp {
+		f.scroll = f.cursor - vp + 1
+	}
+	m.setCur(f)
+}
+
+// countSel menghitung jumlah kartu yang terseleksi (multi-select).
+func countSel(sel map[int]bool) int {
+	n := 0
+	for _, v := range sel {
+		if v {
+			n++
+		}
+	}
+	return n
 }
 
 // selectedProxyNames mengumpulkan nama pool terseleksi (terurut index) yang

@@ -62,14 +62,14 @@ func Run(d Deps) {
 			printHelp(out)
 		case "status", "st":
 			printStatus(out, d)
-	case "system", "sys", "info":
-		printSystem(out, d)
-	case "apikey", "key":
-		if arg != "" {
-			printSysKeyDetail(out, d, arg)
-		} else {
+		case "system", "sys", "info":
 			printSystem(out, d)
-		}
+		case "apikey", "key":
+			if arg != "" {
+				printSysKeyDetail(out, d, arg)
+			} else {
+				printSystem(out, d)
+			}
 		case "providers", "provider", "prov", "ls":
 			if arg != "" {
 				printProviderDetail(out, d, arg)
@@ -284,10 +284,7 @@ func printProviders(out io.Writer, d Deps) {
 		}
 		keysOn, keysTotal := countKeys(p.Keys)
 		modelsOn, modelsTotal := countModels(p.Models)
-		proxy := strings.TrimSpace(p.Proxy)
-		if proxy == "" {
-			proxy = "direct"
-		}
+		proxy := service.ProxyModeShort(snap, p)
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%d/%d\t%ds\n",
 			slug, p.Prefix, p.Name, onOff(bool(p.Enabled)), p.Interface, proxy,
 			keysOn, keysTotal, modelsOn, modelsTotal, int(p.TimeoutSecs))
@@ -307,10 +304,7 @@ func printProviderDetail(out io.Writer, d Deps, arg string) {
 		fmt.Fprintf(out, "provider %q not found — \"providers\" for the list\n", arg)
 		return
 	}
-	proxy := strings.TrimSpace(p.Proxy)
-	if proxy == "" {
-		proxy = "direct"
-	}
+	proxy := service.ProxyModeLabel(snap, p)
 	fmt.Fprintf(out, "provider %s:\n", slug)
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(tw, "  name\t%s\n", p.Name)
@@ -391,31 +385,77 @@ func printProxies(out io.Writer, d Deps) {
 		return
 	}
 	users := reverseProxyUsers(snap)
-	names := make([]string, 0, len(snap.Raw.ProxyPools))
-	for n := range snap.Raw.ProxyPools {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	names := proxyPoolOrder(snap)
 	if len(names) == 0 {
 		fmt.Fprintln(out, "proxyPools: (empty — all providers direct)")
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tTYPE\tSTATUS\tHEALTH\tURL\tUSED BY")
+	fmt.Fprintln(tw, "NAME\tTYPE\tORDER\tSTATUS\tHEALTH\tURL\tUSED BY")
 	for _, n := range names {
 		pp := snap.Raw.ProxyPools[n]
 		if pp == nil {
-			fmt.Fprintf(tw, "%s\t(null)\t-\t-\t-\n", n)
+			fmt.Fprintf(tw, "%s\t(null)\t-\t-\t-\t-\n", n)
 			continue
 		}
 		used := strings.Join(users[n], ", ")
 		if used == "" {
 			used = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", n, proxyTypeLabel(pp.Type), onOff(bool(pp.Enabled)), proxyHealthLabel(d, n), maskProxyURL(pp.URL), used)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", n, proxyTypeLabel(pp.Type), int(pp.Order), onOff(bool(pp.Enabled)), proxyHealthLabel(d, n), maskProxyURL(pp.URL), used)
 	}
 	_ = tw.Flush()
+	// Provider yang memakai mode auto/round tidak muncul sebagai "USED BY" pool.
+	if modes := proxyModeUsers(snap); modes != "" {
+		fmt.Fprintf(out, "modes: %s\n", modes)
+	}
 	fmt.Fprintln(out, "tip: \"proxy <name>\" for details.")
+}
+
+// proxyPoolOrder mengembalikan nama pool terurut urutan pemakaian
+// (order asc, nama asc) — konsisten dengan mode auto/round.
+func proxyPoolOrder(snap *config.Snapshot) []string {
+	if snap == nil || snap.Raw == nil {
+		return nil
+	}
+	if len(snap.ProxyOrder) > 0 {
+		out := make([]string, 0, len(snap.ProxyOrder))
+		for _, n := range snap.ProxyOrder {
+			if snap.Raw.ProxyPools[n] != nil {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	names := make([]string, 0, len(snap.Raw.ProxyPools))
+	for n := range snap.Raw.ProxyPools {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// proxyModeUsers merangkum provider yang memakai mode proxy ("acme=auto, …").
+func proxyModeUsers(snap *config.Snapshot) string {
+	if snap == nil || snap.Raw == nil {
+		return ""
+	}
+	slugs := make([]string, 0, len(snap.Raw.Providers))
+	for s := range snap.Raw.Providers {
+		slugs = append(slugs, s)
+	}
+	sort.Strings(slugs)
+	var parts []string
+	for _, s := range slugs {
+		p := snap.Raw.Providers[s]
+		if p == nil {
+			continue
+		}
+		if mode, ok := service.ProxyMode(p.Proxy); ok {
+			parts = append(parts, s+"="+mode)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func printProxyDetail(out io.Writer, d Deps, arg string) {
@@ -447,8 +487,14 @@ func printProxyDetail(out io.Writer, d Deps, arg string) {
 	fmt.Fprintf(out, "proxy %s:\n", name)
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(tw, "  type\t%s\n", proxyTypeLabel(pp.Type))
+	fmt.Fprintf(tw, "  order\t%d\n", int(pp.Order))
 	fmt.Fprintf(tw, "  status\t%s\n", onOff(bool(pp.Enabled)))
 	fmt.Fprintf(tw, "  health\t%s\n", proxyHealthLabel(d, name))
+	if d.Store != nil && d.Store.ProxyHealth != nil {
+		if msg := d.Store.ProxyHealth.ErrMsg(name); msg != "" {
+			fmt.Fprintf(tw, "  error\t%s\n", msg)
+		}
+	}
 	fmt.Fprintf(tw, "  url\t%s\n", maskProxyURL(pp.URL))
 	_ = tw.Flush()
 	users := reverseProxyUsers(snap)[name]
@@ -575,6 +621,9 @@ func proxyHealthLabel(d Deps, name string) string {
 	if d.Store.ProxyHealth.IsError(name) {
 		return "error"
 	}
+	if d.Store.ProxyHealth.IsTesting(name) {
+		return "testing"
+	}
 	return "ok"
 }
 
@@ -587,11 +636,18 @@ func maskProxyURL(raw string) string {
 	if err != nil || parsed.User == nil {
 		return u
 	}
-	user := parsed.User.Username()
-	if _, hasPass := parsed.User.Password(); hasPass {
-		parsed.User = url.UserPassword(user, "****")
+	if _, hasPass := parsed.User.Password(); !hasPass {
+		return u
 	}
-	return parsed.String()
+	// Jangan pakai url.UserPassword(user, "****")+String(): Go me-encode
+	// mask menjadi %2A%2A%2A%2A. Splice manual agar tampil apa adanya.
+	user := url.User(parsed.User.Username()).String()
+	parsed.User = nil
+	s := parsed.String()
+	if i := strings.Index(s, "://"); i >= 0 {
+		return s[:i+3] + user + ":****@" + s[i+3:]
+	}
+	return s
 }
 
 func formatCreated(unix int64) string {
@@ -650,7 +706,7 @@ func reverseProxyUsers(snap *config.Snapshot) map[string][]string {
 			continue
 		}
 		name := strings.TrimSpace(p.Proxy)
-		if name == "" {
+		if name == "" || config.IsProxyMode(name) {
 			continue
 		}
 		out[name] = append(out[name], slug)

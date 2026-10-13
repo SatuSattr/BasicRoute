@@ -23,13 +23,13 @@ const (
 
 // provCard adalah ringkasan satu provider untuk kartu.
 type provCard struct {
-	slug                 string
-	name                 string
-	prefix               string
-	baseURL              string
-	proxy                string
-	enabled              bool
-	keysOn, keysTotal    int
+	slug                  string
+	name                  string
+	prefix                string
+	baseURL               string
+	proxy                 string
+	enabled               bool
+	keysOn, keysTotal     int
 	modelsOn, modelsTotal int
 }
 
@@ -65,10 +65,7 @@ func (m Model) provCards() []provCard {
 				c.modelsOn++
 			}
 		}
-		c.proxy = strings.TrimSpace(p.Proxy)
-		if c.proxy == "" {
-			c.proxy = "direct"
-		}
+		c.proxy = service.ProxyModeShort(snap, p)
 		out = append(out, c)
 	}
 	return out
@@ -173,35 +170,23 @@ func (m Model) providersGridView(f frame) string {
 				body = append(body, "")
 			}
 		}
-		if f.cursor >= 0 && f.cursor < len(cards) {
-			sel := cards[f.cursor]
-			body = append(body, "")
-			body = append(body, styleFooter.Render("▸ "+sel.slug+"  ·  "+sel.prefix+"  ·  "+sel.proxy))
-		}
 	}
 
 	for len(body) < vp {
 		body = append(body, "")
 	}
-	return styleWin.Width(m.width - 2).Render(strings.Join(body, "\n")) + "\n"
+	return styleWin.Width(m.width-2).Render(strings.Join(body, "\n")) + "\n"
 }
 
-// ensureCardVisible menggeser scroll baris agar cursor terlihat.
+// ensureCardVisible menggeser scroll baris agar cursor terlihat (grid provider).
 func (m *Model) ensureCardVisible() {
 	f := m.cur()
-	var n, cols, vis int
-	switch f.pg {
-	case pgProviders:
-		n = len(m.provCards())
-		cols = m.provCols(n)
-		vis = m.provVisRows()
-	case pgProxies:
-		n = len(m.proxyCards())
-		cols = m.proxyCols(n)
-		vis = m.proxyVisRows()
-	default:
+	if f.pg != pgProviders {
 		return
 	}
+	n := len(m.provCards())
+	cols := m.provCols(n)
+	vis := m.provVisRows()
 	if n == 0 {
 		return
 	}
@@ -242,6 +227,24 @@ func (l dline) render(w int) string {
 		sb.WriteString(s.st.Render(t))
 	}
 	return sb.String()
+}
+
+// renderSelected menggambar baris terseleksi ala tabel Api Key: dot tetap
+// berwarna, sisa teks digambar polos dengan styleItemSel sehingga terang
+// menembus teks (bukan menimpa style redup di atasnya).
+func (l dline) renderSelected(w int) string {
+	if len(l.segs) == 0 || w <= 0 {
+		return styleItemSel.Width(w).Render("")
+	}
+	dot := l.segs[0]
+	var sb strings.Builder
+	for _, s := range l.segs[1:] {
+		sb.WriteString(s.text)
+	}
+	rest := sb.String()
+	dotW := runeLen(dot.text)
+	rest = trunc(rest, w-dotW)
+	return dot.st.Render(dot.text) + styleItemSel.Width(w-dotW).Render(rest)
 }
 
 func runeLen(s string) int { return len([]rune(s)) }
@@ -303,22 +306,89 @@ type pkeyRow struct {
 	cool bool
 }
 
+// provKeyErr melaporkan key provider sedang flagged error (dot merah).
+func (m Model) provKeyErr(slug, name string) bool {
+	return m.deps.Store != nil && m.deps.Store.ProvHealth != nil &&
+		m.deps.Store.ProvHealth.IsError(service.ProvKeyID(slug, name))
+}
+
+// provModelErr melaporkan model provider sedang flagged error (dot merah).
+func (m Model) provModelErr(slug, modelSlug string) bool {
+	return m.deps.Store != nil && m.deps.Store.ProvHealth != nil &&
+		m.deps.Store.ProvHealth.IsError(service.ProvModelID(slug, modelSlug))
+}
+
+// provKeyTesting melaporkan key provider sedang di-test (dot kuning).
+func (m Model) provKeyTesting(slug, name string) bool {
+	return m.deps.Store != nil && m.deps.Store.ProvHealth != nil &&
+		m.deps.Store.ProvHealth.IsTesting(service.ProvKeyID(slug, name))
+}
+
+// provModelTesting melaporkan model provider sedang di-test (dot kuning).
+func (m Model) provModelTesting(slug, modelSlug string) bool {
+	return m.deps.Store != nil && m.deps.Store.ProvHealth != nil &&
+		m.deps.Store.ProvHealth.IsTesting(service.ProvModelID(slug, modelSlug))
+}
+
+// provDot memilih style dot baris key/model: kuning (sedang di-test),
+// merah (flagged), hijau (enabled), abu (disabled).
+func (m Model) provDot(slug string, isKey bool, name string, on bool) lipgloss.Style {
+	switch {
+	case isKey && m.provKeyTesting(slug, name), !isKey && m.provModelTesting(slug, name):
+		return styleDotTest
+	case isKey && m.provKeyErr(slug, name), !isKey && m.provModelErr(slug, name):
+		return styleDotErr
+	case on:
+		return styleDotOn
+	default:
+		return styleDotOff
+	}
+}
+
+// provErrLine mengembalikan baris detail error untuk baris cursor
+// (key/model), "" bila baris sehat. Dipakai di dasar container detail.
+func (m Model) provErrLine(slug string, cursor int) string {
+	if m.deps.Store == nil || m.deps.Store.ProvHealth == nil {
+		return ""
+	}
+	ids := m.provRowIDs(slug)
+	if cursor < 0 || cursor >= len(ids) {
+		return ""
+	}
+	id := ids[cursor]
+	kind := "model"
+	key := service.ProvModelID(slug, id.name)
+	if id.isKey {
+		kind = "key"
+		key = service.ProvKeyID(slug, id.name)
+	}
+	msg := m.deps.Store.ProvHealth.ErrMsg(key)
+	if msg == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s %q error: %s", kind, id.label, msg)
+}
+
 // providerDetail membangun baris-baris halaman detail (seksi rapi).
-func (m Model) providerDetail(f frame) []dline {
+// Mengembalikan juga index baris yang bisa di-select, dipisah per seksi:
+// keyLines (keys) lalu modelLines (models), agar multi-select tidak
+// menembus antar seksi.
+func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLines []int) {
 	inner := m.innerW()
 	snap := m.deps.Store.Get()
 	if snap == nil || snap.Raw == nil {
-		return []dline{{[]dseg{{"(snapshot not ready)", styleBody}}}}
+		return []dline{{[]dseg{{"(snapshot not ready)", styleBody}}}}, nil, nil
 	}
 	slug, p := lookupProv(snap, f.arg)
 	if p == nil {
 		return []dline{
 			{[]dseg{{"provider " + fmt.Sprintf("%q", f.arg) + " not found", styleErr}}},
 			{[]dseg{{"Esc to go back", styleFooter}}},
-		}
+		}, nil, nil
 	}
 
 	var out []dline
+	var keys, models []int
 
 	// Judul: indikator status di depan nama.
 	ds := styleDotOn
@@ -330,10 +400,7 @@ func (m Model) providerDetail(f frame) []dline {
 
 	// Seksi 1: informasi dasar.
 	out = append(out, dline{[]dseg{{"Basic info", styleSecHead}}})
-	proxy := strings.TrimSpace(p.Proxy)
-	if proxy == "" {
-		proxy = "direct"
-	}
+	proxy := service.ProxyModeLabel(snap, p)
 	info := [][2]string{
 		{"prefix", p.Prefix},
 		{"type", p.Type},
@@ -400,10 +467,7 @@ func (m Model) providerDetail(f frame) []dline {
 			{padRight("NAME", nW+2) + padRight("ORDER", oW) + padRight("COOLDOWN", cW) + "KEY", styleDetLbl},
 		}})
 		for _, r := range krows {
-			ds := styleDotOff
-			if r.on {
-				ds = styleDotOn
-			}
+			ds := m.provDot(slug, true, r.name, r.on)
 			cool, cools := "-", styleDetLbl
 			if r.cool {
 				cool, cools = "cooling", styleLogWarn
@@ -415,6 +479,7 @@ func (m Model) providerDetail(f frame) []dline {
 				{padRight(cool, cW), cools},
 				{r.mask, styleDetVal},
 			}})
+			keys = append(keys, len(out)-1)
 		}
 	}
 
@@ -433,13 +498,13 @@ func (m Model) providerDetail(f frame) []dline {
 	} else {
 		sW, fW, cW, oW := runeLen("NAME"), runeLen("FULL ID"), runeLen("CTX"), runeLen("OUT")
 		type mrow struct {
-			name, full, ctx, out, created string
-			on                            bool
+			slug, name, full, ctx, out, created string
+			on                                  bool
 		}
 		var mrows []mrow
 		for _, ms := range mslugs {
 			md := p.Models[ms]
-			r := mrow{name: ms, full: p.Prefix + "/" + ms}
+			r := mrow{slug: ms, name: ms, full: p.Prefix + "/" + ms}
 			if md != nil {
 				if strings.TrimSpace(md.Name) != "" {
 					r.name = md.Name
@@ -472,10 +537,7 @@ func (m Model) providerDetail(f frame) []dline {
 			{padRight("NAME", sW+2) + padRight("FULL ID", fW) + padRight("CTX", cW) + padRight("OUT", oW) + "CREATED", styleDetLbl},
 		}})
 		for _, r := range mrows {
-			ds := styleDotOff
-			if r.on {
-				ds = styleDotOn
-			}
+			ds := m.provDot(slug, false, r.slug, r.on)
 			out = append(out, dline{[]dseg{
 				{"• ", ds},
 				{padRight(r.name, sW), styleDetVal},
@@ -484,28 +546,185 @@ func (m Model) providerDetail(f frame) []dline {
 				{padRight(r.out, oW), styleDetVal},
 				{r.created, styleDetLbl},
 			}})
+			models = append(models, len(out)-1)
 		}
+	}
+	return out, keys, models
+}
+
+// provRowID mengidentifikasi satu baris selectable di domain cursor datar.
+type provRowID struct {
+	isKey bool
+	name  string // nama key, atau slug model (untuk API)
+	label string // nama tampil (display Name bila ada)
+	on    bool   // enabled
+}
+
+// provRowIDs mengembalikan identitas baris seurut cursor datar
+// (keys urut order lalu nama, models urut slug) — konsisten dengan
+// providerDetail agar cursor selalu memetakan ke baris yang benar.
+func (m Model) provRowIDs(slug string) []provRowID {
+	snap := m.deps.Store.Get()
+	if snap == nil || snap.Raw == nil {
+		return nil
+	}
+	_, p := lookupProv(snap, slug)
+	if p == nil {
+		return nil
+	}
+	var out []provRowID
+	type krow struct {
+		name string
+		ord  int
+		on   bool
+	}
+	var krows []krow
+	for n, k := range p.Keys {
+		if k == nil {
+			krows = append(krows, krow{name: n})
+			continue
+		}
+		krows = append(krows, krow{name: n, ord: int(k.Order), on: bool(k.Enabled)})
+	}
+	sort.Slice(krows, func(i, j int) bool {
+		if krows[i].ord != krows[j].ord {
+			return krows[i].ord < krows[j].ord
+		}
+		return krows[i].name < krows[j].name
+	})
+	for _, r := range krows {
+		out = append(out, provRowID{isKey: true, name: r.name, label: r.name, on: r.on})
+	}
+	mslugs := make([]string, 0, len(p.Models))
+	for ms := range p.Models {
+		mslugs = append(mslugs, ms)
+	}
+	sort.Strings(mslugs)
+	for _, ms := range mslugs {
+		md := p.Models[ms]
+		label := ms
+		on := false
+		if md != nil {
+			if strings.TrimSpace(md.Name) != "" {
+				label = md.Name
+			}
+			on = bool(md.Enabled)
+		}
+		out = append(out, provRowID{name: ms, label: label, on: on})
 	}
 	return out
 }
 
-// providerDetailView: seksi detail dalam window, di-scroll + stabil.
+// provFlat menggabung baris selectable keys+models ke domain cursor datar.
+func provFlat(keyLines, modelLines []int) []int {
+	out := make([]int, 0, len(keyLines)+len(modelLines))
+	out = append(out, keyLines...)
+	out = append(out, modelLines...)
+	return out
+}
+
+// provSection mengembalikan batas cursor [lo,hi] untuk seksi cursor saat ini
+// (keys: 0..nk-1, models: nk..n-1) agar multi-select tidak menembus seksi.
+func provSection(cursor, nk, n int) (lo, hi int) {
+	if n <= 0 {
+		return 0, -1
+	}
+	if cursor < nk {
+		return 0, nk - 1
+	}
+	return nk, n - 1
+}
+
+// provSelLabel memberi label jumlah multi-select per seksi untuk footer.
+func provSelLabel(nk int, sel map[int]bool) string {
+	nkSel, mSel := 0, 0
+	for p := range sel {
+		if p < nk {
+			nkSel++
+		} else {
+			mSel++
+		}
+	}
+	switch {
+	case nkSel > 0 && mSel == 0:
+		return fmt.Sprintf("%d keys selected", nkSel)
+	case mSel > 0 && nkSel == 0:
+		return fmt.Sprintf("%d models selected", mSel)
+	case nkSel+mSel > 0:
+		return fmt.Sprintf("%d selected", nkSel+mSel)
+	default:
+		return ""
+	}
+}
+
+// providerDetailView: seksi detail dalam window, seleksi keys/models + auto-scroll.
 func (m Model) providerDetailView(f frame) string {
 	inner := m.innerW()
 	vp := m.viewportH()
-	lines := m.providerDetail(f)
+	lines, keyLines, modelLines := m.providerDetail(f)
+	selectable := provFlat(keyLines, modelLines)
 
 	start := clamp(f.scroll, 0, maxScroll(len(lines), vp))
 	end := start + vp
 	if end > len(lines) {
 		end = len(lines)
 	}
+	selLine := -1
+	if f.cursor >= 0 && f.cursor < len(selectable) {
+		selLine = selectable[f.cursor]
+	}
+	picked := map[int]bool{}
+	for pos := range f.sel {
+		if pos >= 0 && pos < len(selectable) {
+			picked[selectable[pos]] = true
+		}
+	}
 	vis := make([]string, 0, vp)
-	for _, l := range lines[start:end] {
-		vis = append(vis, l.render(inner))
+	for i := start; i < end; i++ {
+		if i == selLine || picked[i] {
+			vis = append(vis, lines[i].renderSelected(inner))
+			continue
+		}
+		vis = append(vis, lines[i].render(inner))
 	}
 	for len(vis) < vp {
 		vis = append(vis, "")
 	}
-	return styleWin.Width(m.width - 2).Render(strings.Join(vis, "\n")) + "\n"
+	// Baris dasar container: detail error baris fokus bila flagged,
+	// jika tidak maka padding seperti biasa (layout tidak bergeser).
+	if len(vis) > 0 {
+		if el := m.provErrLine(f.arg, f.cursor); el != "" {
+			vis[len(vis)-1] = styleErr.Render(trunc(el, inner))
+		}
+	}
+	return styleWin.Width(m.width-2).Render(strings.Join(vis, "\n")) + "\n"
+}
+
+// ensureProviderVisible menggeser scroll agar baris terseleksi terlihat.
+func (m *Model) ensureProviderVisible() {
+	f := m.cur()
+	if f.pg != pgProvider {
+		return
+	}
+	lines, keyLines, modelLines := m.providerDetail(f)
+	selectable := provFlat(keyLines, modelLines)
+	if len(selectable) == 0 {
+		return
+	}
+	if f.cursor < 0 {
+		f.cursor = 0
+	}
+	if f.cursor >= len(selectable) {
+		f.cursor = len(selectable) - 1
+	}
+	selLine := selectable[f.cursor]
+	vp := m.viewportH()
+	if selLine < f.scroll {
+		f.scroll = selLine
+	} else if selLine >= f.scroll+vp {
+		f.scroll = selLine - vp + 1
+	}
+	maxS := maxScroll(len(lines), vp)
+	f.scroll = clamp(f.scroll, 0, maxS)
+	m.setCur(f)
 }

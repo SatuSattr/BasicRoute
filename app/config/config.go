@@ -73,17 +73,25 @@ const (
 	ProxyTypeRelay = "relay" // http relay (mis. 9router): https://relay.example.com + header x-relay-*
 )
 
+// Mode proxy khusus pada Provider.Proxy (selain nama pool biasa).
+const (
+	ProxyModeAuto  = "auto"  // pakai semua pool enabled berurutan order, failover ke pool berikutnya
+	ProxyModeRound = "round" // sama seperti auto tapi urutan awal berotasi (round robin)
+)
+
 type ProxyPool struct {
 	Type    string   `json:"type,omitempty"` // "" / "http" = forward proxy, "relay" = http relay
 	URL     string   `json:"url"`
+	Order   FlexInt  `json:"order"` // urutan pemakaian mode auto/round, unik antar pool
 	Enabled FlexBool `json:"enabled"`
 }
 
 type Snapshot struct {
-	Gen      uint64
-	Raw      *Config
-	ModelMap map[string]*ModelRef   // key = FullID ("<prefix>/<modelSlug>")
-	KeyRings map[string][]*KeyEntry // key = provider slug, value = enabled keys terurut Order
+	Gen        uint64
+	Raw        *Config
+	ModelMap   map[string]*ModelRef   // key = FullID ("<prefix>/<modelSlug>")
+	KeyRings   map[string][]*KeyEntry // key = provider slug, value = enabled keys terurut Order
+	ProxyOrder []string               // nama semua pool terurut (order asc, nama asc)
 }
 
 type ModelRef struct {
@@ -205,6 +213,35 @@ func stripTrailingCommas(src []byte) []byte {
 
 var prefixRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
+// isReservedProxyName melaporkan apakah nama pool memakai kata kunci mode
+// proxy (auto/round) — nama seperti itu dilarang agar tidak ambigu.
+func isReservedProxyName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case ProxyModeAuto, ProxyModeRound:
+		return true
+	}
+	return false
+}
+
+// IsProxyMode melaporkan apakah nilai Provider.Proxy adalah mode khusus
+// ("auto"/"round", case-insensitive) alih-alih nama pool.
+func IsProxyMode(s string) bool {
+	_, ok := ProxyModeOf(s)
+	return ok
+}
+
+// ProxyModeOf mengembalikan mode proxy (lowercase) bila s adalah kata kunci
+// mode; ok=false berarti nama pool biasa atau direct.
+func ProxyModeOf(s string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case ProxyModeAuto:
+		return ProxyModeAuto, true
+	case ProxyModeRound:
+		return ProxyModeRound, true
+	}
+	return "", false
+}
+
 func Load(path string) (*Snapshot, error) {
 	return LoadWithEnv(path, "")
 }
@@ -283,9 +320,13 @@ func validateAndNormalize(cfg *Config) error {
 	if cfg.ProxyPools == nil {
 		cfg.ProxyPools = map[string]*ProxyPool{}
 	}
+	seenPoolOrder := map[int]string{}
 	for name, p := range cfg.ProxyPools {
 		if p == nil {
 			return fmt.Errorf("proxyPools[%q]: entry null", name)
+		}
+		if isReservedProxyName(name) {
+			return fmt.Errorf("proxyPools[%q]: reserved name (proxy mode keyword %q/%q); rename this pool", name, ProxyModeAuto, ProxyModeRound)
 		}
 		p.Type = strings.ToLower(strings.TrimSpace(p.Type))
 		if p.Type == "" {
@@ -296,6 +337,13 @@ func validateAndNormalize(cfg *Config) error {
 		default:
 			return fmt.Errorf("proxyPools[%q].type: must be %q or %q, got %q", name, ProxyTypeHTTP, ProxyTypeRelay, p.Type)
 		}
+		if p.Order < 1 {
+			return fmt.Errorf("proxyPools[%q].order: must be >= 1, got %d", name, int(p.Order))
+		}
+		if other, dup := seenPoolOrder[int(p.Order)]; dup {
+			return fmt.Errorf("proxyPools[%q].order: duplicate order %d already used by %s", name, int(p.Order), fmt.Sprintf("proxyPools[%q]", other))
+		}
+		seenPoolOrder[int(p.Order)] = name
 		u := strings.TrimSpace(p.URL)
 		if u == "" {
 			return fmt.Errorf("proxyPools[%q].url: required", name)
@@ -313,6 +361,12 @@ func validateAndNormalize(cfg *Config) error {
 			return fmt.Errorf("proxyPools[%q].url: type %q takes no user:password@ (use type %q for credentialed forward proxies)", name, ProxyTypeRelay, ProxyTypeHTTP)
 		}
 		p.URL = u
+	}
+	enabledPools := 0
+	for _, p := range cfg.ProxyPools {
+		if p != nil && bool(p.Enabled) {
+			enabledPools++
+		}
 	}
 
 	if len(cfg.Providers) == 0 {
@@ -355,8 +409,13 @@ func validateAndNormalize(cfg *Config) error {
 
 		if strings.TrimSpace(prov.Proxy) != "" {
 			prov.Proxy = strings.TrimSpace(prov.Proxy)
-			if _, ok := cfg.ProxyPools[prov.Proxy]; !ok {
-				return fmt.Errorf("%s.proxy: pool %q not found in proxyPools", base, prov.Proxy)
+			if mode, isMode := ProxyModeOf(prov.Proxy); isMode {
+				if enabledPools == 0 {
+					return fmt.Errorf("%s.proxy: mode %q needs >=1 enabled proxy pool", base, mode)
+				}
+				prov.Proxy = mode
+			} else if _, ok := cfg.ProxyPools[prov.Proxy]; !ok {
+				return fmt.Errorf("%s.proxy: pool %q not found in proxyPools (use a pool name, %q, or %q)", base, prov.Proxy, ProxyModeAuto, ProxyModeRound)
 			}
 		}
 
@@ -435,6 +494,24 @@ func buildSnapshot(cfg *Config) *Snapshot {
 		ModelMap: map[string]*ModelRef{},
 		KeyRings: map[string][]*KeyEntry{},
 	}
+	// ProxyOrder: semua pool terurut order asc, nama asc (dasar mode auto/round).
+	for name := range cfg.ProxyPools {
+		snap.ProxyOrder = append(snap.ProxyOrder, name)
+	}
+	sort.Slice(snap.ProxyOrder, func(i, j int) bool {
+		a, b := cfg.ProxyPools[snap.ProxyOrder[i]], cfg.ProxyPools[snap.ProxyOrder[j]]
+		ao, bo := 0, 0
+		if a != nil {
+			ao = int(a.Order)
+		}
+		if b != nil {
+			bo = int(b.Order)
+		}
+		if ao != bo {
+			return ao < bo
+		}
+		return snap.ProxyOrder[i] < snap.ProxyOrder[j]
+	})
 	for slug, prov := range cfg.Providers {
 		var ring []*KeyEntry
 		for kname, k := range prov.Keys {

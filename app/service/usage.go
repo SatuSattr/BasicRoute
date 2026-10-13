@@ -45,6 +45,7 @@ type UsageTracker struct {
 	mu    sync.Mutex
 	base  map[string]*UsageEntry // terakhir dari disk / flush
 	delta map[string]uint64      // akumulasi sejak flush terakhir
+	last  map[string]int64       // unix terakhir request per hash (memory, langsung update)
 	names map[string]string      // hash -> nama terakhir (untuk flush)
 
 	dirty atomic.Bool
@@ -58,6 +59,7 @@ func NewUsageTracker(path string) *UsageTracker {
 		path:  path,
 		base:  map[string]*UsageEntry{},
 		delta: map[string]uint64{},
+		last:  map[string]int64{},
 		names: map[string]string{},
 	}
 }
@@ -95,13 +97,18 @@ func (u *UsageTracker) Load() {
 	}
 }
 
-// Add menambah tokens ke akumulasi memori. Tidak menyentuh disk.
+// Add mencatat request: menambah tokens ke akumulasi memori sekaligus
+// memperbarui waktu terakhir (Last) saat itu juga. Tidak menyentuh disk.
+// tokens==0 tetap memperbarui Last (request tanpa usage tetap dihitung).
 func (u *UsageTracker) Add(hash, name string, tokens uint64) {
-	if u == nil || hash == "" || tokens == 0 {
+	if u == nil || hash == "" {
 		return
 	}
 	u.mu.Lock()
-	u.delta[hash] += tokens
+	if tokens > 0 {
+		u.delta[hash] += tokens
+	}
+	u.last[hash] = time.Now().Unix()
 	if name != "" {
 		u.names[hash] = name
 	}
@@ -139,6 +146,44 @@ func (u *UsageTracker) Snapshot() map[string]uint64 {
 	}
 	for h, d := range u.delta {
 		out[h] += d
+	}
+	return out
+}
+
+// LastSeen mengembalikan unix terakhir request untuk satu hash
+// (memory dulu, jatuh ke UpdatedAt dari disk). 0 = belum pernah.
+func (u *UsageTracker) LastSeen(hash string) int64 {
+	if u == nil || hash == "" {
+		return 0
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if ts := u.last[hash]; ts > 0 {
+		return ts
+	}
+	if e := u.base[hash]; e != nil {
+		return e.UpdatedAt
+	}
+	return 0
+}
+
+// SnapshotLast mengembalikan waktu terakhir semua hash. Dipakai UI/CLI.
+func (u *UsageTracker) SnapshotLast() map[string]int64 {
+	if u == nil {
+		return map[string]int64{}
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make(map[string]int64, len(u.base)+len(u.last))
+	for h, e := range u.base {
+		if e != nil && e.UpdatedAt > 0 {
+			out[h] = e.UpdatedAt
+		}
+	}
+	for h, ts := range u.last {
+		if ts > out[h] {
+			out[h] = ts
+		}
 	}
 	return out
 }
@@ -185,6 +230,25 @@ func (u *UsageTracker) Flush() error {
 			e.Name = n
 		}
 	}
+	// Timestamp memory (termasuk request tanpa usage) ikut persist.
+	for h, ts := range u.last {
+		if ts <= 0 {
+			continue
+		}
+		e := merged[h]
+		if e == nil {
+			e = &UsageEntry{}
+			merged[h] = e
+		}
+		if ts > e.UpdatedAt {
+			e.UpdatedAt = ts
+		}
+		if e.Name == "" {
+			if n := u.names[h]; n != "" {
+				e.Name = n
+			}
+		}
+	}
 	u.mu.Unlock()
 
 	if err := writeAtomicJSON(u.path, usageFile{Version: 1, Keys: merged}); err != nil {
@@ -194,6 +258,7 @@ func (u *UsageTracker) Flush() error {
 	u.mu.Lock()
 	u.base = merged
 	clear(u.delta)
+	clear(u.last)
 	u.mu.Unlock()
 	u.dirty.Store(false)
 	return nil
