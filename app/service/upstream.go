@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -150,13 +151,70 @@ func roundTripperFor(proxyType, proxyURL string) (http.RoundTripper, error) {
 
 func IsRetryable(status int, err error) bool {
 	switch status {
-	case 429, 500, 502, 503, 504:
+	case 408, 429, 500, 502, 503, 504:
 		return true
 	}
 	if err == nil {
 		return false
 	}
 	return isRetryableNetErr(err)
+}
+
+// ParseRetryAfter mem-parse nilai header Retry-After: detik integer atau
+// http-date. Clamp 1s..300s. Return 0 bila kosong/invalid/masa lalu.
+func ParseRetryAfter(v string) time.Duration {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		if n <= 0 {
+			return 0
+		}
+		if n < 1 {
+			n = 1
+		}
+		if n > 300 {
+			n = 300
+		}
+		return time.Duration(n) * time.Second
+	}
+	t, err := http.ParseTime(s)
+	if err != nil {
+		// http.ParseTime hanya menerima "GMT"; coba RFC1123 umum (zona lain).
+		t, err = time.Parse(time.RFC1123, s)
+	}
+	if err != nil {
+		return 0
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return 0
+	}
+	if d < time.Second {
+		d = time.Second
+	}
+	if d > 300*time.Second {
+		d = 300 * time.Second
+	}
+	return d
+}
+
+// CooldownForStatus menentukan durasi cooldown untuk status HTTP upstream.
+// Status 401/403/408 selalu 60s (abaikan retry-after). Status retryable
+// lainnya memakai ParseRetryAfter bila >0, else 60s. Selain itu return 0.
+func CooldownForStatus(status int, retryAfter string) time.Duration {
+	switch status {
+	case 401, 403, 408:
+		return 60 * time.Second
+	}
+	if IsRetryable(status, nil) {
+		if d := ParseRetryAfter(retryAfter); d > 0 {
+			return d
+		}
+		return 60 * time.Second
+	}
+	return 0
 }
 
 func isRetryableNetErr(err error) bool {

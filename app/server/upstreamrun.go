@@ -39,24 +39,45 @@ type attemptOutcome struct {
 
 // upstreamRun membawa konteks satu request untuk menembus satu target proxy.
 type upstreamRun struct {
-	s             *Server
-	w             http.ResponseWriter
-	r             *http.Request
-	lg            *slog.Logger
-	ref           *config.ModelRef
-	client        *http.Client
-	tgt           service.ProxyTarget
-	upURL         string
-	upBody        []byte
-	timeout       time.Duration
-	stream        bool
-	singleTry     bool
-	ring          []*config.KeyEntry
-	healthy       bool
-	healthModelID string
-	callerHash    string
-	callerName    string
-	lastErr       error // kegagalan terakhir (untuk pesan 502 terakhir)
+	s               *Server
+	w               http.ResponseWriter
+	r               *http.Request
+	lg              *slog.Logger
+	ref             *config.ModelRef
+	client          *http.Client
+	tgt             service.ProxyTarget
+	upURL           string
+	upBody          []byte
+	timeout         time.Duration
+	stream          bool
+	singleTry       bool
+	ring            []*config.KeyEntry
+	healthy         bool
+	healthModelID   string
+	callerHash      string
+	callerName      string
+	lastErr         error  // kegagalan terakhir (untuk pesan 502 terakhir)
+	lastStatus      int    // status retryable/auth terakhir untuk driver
+	lastRetryAfter  string // nilai header Retry-After terakhir
+	lastBodySnippet string // max 300 char body terakhir (untuk pesan error)
+}
+
+// snippet memangkas body ke n char: trim spasi, ganti newline jadi spasi.
+func snippet(b []byte, n int) string {
+	s := strings.TrimSpace(string(b))
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	// Collapse runs of spaces from newline replacement.
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	if n <= 0 {
+		return ""
+	}
+	if len(s) > n {
+		s = s[:n]
+	}
+	return s
 }
 
 // proxyLabel mengembalikan nama pool untuk log ("direct" bila tanpa pool).
@@ -177,15 +198,49 @@ func (u *upstreamRun) attempt(ke *config.KeyEntry, keyID string) attemptOutcome 
 		return attemptOutcome{kind: attemptProxyFail, err: fmt.Errorf("upstream HTTP %d", resp.StatusCode)}
 	}
 
-	// Status transien (429/5xx): cooldown key, coba key berikutnya.
-	if !u.singleTry && service.IsRetryable(resp.StatusCode, nil) {
+	// 401/403/408: key bermasalah/transien -> coba key berikutnya
+	// (kecuali singleTry: hormati circuit-breaker model flagged, serve langsung).
+	if !u.singleTry && (resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 408) {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		cancel()
-		u.s.st.MarkCooldown(keyID, 60*time.Second)
 		u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, ttft.Milliseconds(), true)
+		msg := fmt.Sprintf("upstream HTTP %d for model %q", resp.StatusCode, u.ref.ModelSlug)
+		u.s.st.ProvHealth.SetError(keyID, msg)
+		if cd := service.CooldownForStatus(resp.StatusCode, resp.Header.Get("Retry-After")); cd > 0 {
+			u.s.st.MarkCooldown(keyID, cd)
+		} else {
+			u.s.st.MarkCooldown(keyID, 60*time.Second)
+		}
+		u.lastStatus = resp.StatusCode
+		u.lastRetryAfter = resp.Header.Get("Retry-After")
+		u.lastBodySnippet = snippet(body, 300)
+		u.lastErr = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
 		u.lg.Warn("up<", "provider", u.ref.ProviderSlug, "key", ke.Name, "status", resp.StatusCode, "retry", true)
-		return attemptOutcome{kind: attemptUpstreamRetry}
+		return attemptOutcome{kind: attemptUpstreamRetry, err: u.lastErr}
+	}
+
+	// Status transien (429/5xx): cooldown key, coba key berikutnya.
+	if !u.singleTry && service.IsRetryable(resp.StatusCode, nil) {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		cancel()
+		if cd := service.CooldownForStatus(resp.StatusCode, resp.Header.Get("Retry-After")); cd > 0 {
+			u.s.st.MarkCooldown(keyID, cd)
+		} else {
+			u.s.st.MarkCooldown(keyID, 60*time.Second)
+		}
+		u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, ttft.Milliseconds(), true)
+		u.lastStatus = resp.StatusCode
+		u.lastRetryAfter = resp.Header.Get("Retry-After")
+		u.lastBodySnippet = snippet(body, 300)
+		if u.lastErr == nil {
+			u.lastErr = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
+		}
+		u.lg.Warn("up<", "provider", u.ref.ProviderSlug, "key", ke.Name, "status", resp.StatusCode, "retry", true)
+		return attemptOutcome{kind: attemptUpstreamRetry, err: u.lastErr}
 	}
 
 	// Teruskan respons apa adanya (streaming atau buffered).
@@ -215,10 +270,14 @@ func (u *upstreamRun) serve(resp *http.Response, ke *config.KeyEntry, keyID stri
 		} else {
 			n, _ = io.Copy(io.MultiWriter(u.w, cap), resp.Body)
 		}
+		resp.Body.Close()
 	} else {
-		n, _ = io.Copy(io.MultiWriter(u.w, cap), resp.Body)
+		// Non-SSE: buffer dulu dengan batas 8MB agar respons non-2xx
+		// diteruskan utuh; fallback antar-key sudah ditangani di attempt().
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		resp.Body.Close()
+		n, _ = io.Copy(io.MultiWriter(u.w, cap), bytes.NewReader(body))
 	}
-	resp.Body.Close()
 	el := time.Since(t0)
 	ok2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
 	u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, el.Milliseconds(), !ok2xx)

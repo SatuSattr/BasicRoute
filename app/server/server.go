@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -366,35 +367,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Key flagged di-skip bila masih ada alternatif sehat; bila semua
 	// flagged (last-resort) tetap dicoba agar tidak outage total.
-	hasHealthy := false
-	for _, ke := range ring {
-		if ke == nil {
-			continue
-		}
-		id := service.CooldownKey(ref.ProviderSlug, ke.Name)
-		if s.st.Cooldown(id) || s.st.ProvHealth.IsError(id) {
-			continue
-		}
-		hasHealthy = true
-		break
-	}
-	eligible := make([]*config.KeyEntry, 0, len(ring))
-	for _, ke := range ring {
-		if ke == nil {
-			continue
-		}
-		id := service.CooldownKey(ref.ProviderSlug, ke.Name)
-		if s.st.Cooldown(id) {
-			continue
-		}
-		if hasHealthy && s.st.ProvHealth.IsError(id) {
-			continue
-		}
-		eligible = append(eligible, ke)
-	}
+	eligible, hasHealthy := s.eligibleForKeys(ring, ref.ProviderSlug)
 	// Model flagged: hanya key sehat pertama yang dicoba (tanpa failover key).
 	if singleTry && len(eligible) > 1 {
 		eligible = eligible[:1]
+	}
+	// Key round robin: hanya aktif bila provider KeyStrategy=="round".
+	// Namespace kursor terpisah dari proxy via Store.NextKeyIndex.
+	if ref.Provider.IsKeyRound() && len(eligible) > 1 {
+		start := s.st.NextKeyIndex(ref.ProviderSlug, len(eligible))
+		eligible = append(append([]*config.KeyEntry{}, eligible[start:]...), eligible[:start]...)
 	}
 
 	// Request masuk: silent re-test key & proxy ber-flag di background
@@ -404,52 +386,97 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Driver: key di loop luar (tiap key bisa punya proxy sendiri yang
 	// meng-override proxy provider), target proxy key di loop dalam.
+	// Status terakhir upstream dibaca langsung dari run.lastStatus (diisi
+	// attempt untuk 401/403/408/429/5xx); parseUpstreamStatus hanya fallback
+	// bila field kosong (mis. proxy-fail "upstream HTTP 407").
 	tried := 0
 	var lastErr error
-	for _, ke := range eligible {
-		keyTargets, noFallback, terr := service.ResolveKeyProxies(snap, ke, targets)
-		if terr != nil {
-			writeErr(w, http.StatusBadGateway, terr.Error(), "server_error", "bad_gateway")
-			lg.Warn("key proxy resolve failed", "provider", ref.ProviderSlug, "key", ke.Name, "err", terr.Error())
-			lg.Info("req<", "status", 502, "key", ke.Name)
+	lastStatus := 0
+	lastRetryAfter := ""
+	// runPass menjalankan satu pass key x target. done=true berarti respons
+	// sudah ditulis (served atau terminal noFallback) -> caller harus return.
+	runPass := func(keys []*config.KeyEntry) (done bool) {
+		for _, ke := range keys {
+			keyTargets, noFallback, terr := service.ResolveKeyProxies(snap, ke, targets)
+			if terr != nil {
+				writeErr(w, http.StatusBadGateway, terr.Error(), "server_error", "bad_gateway")
+				lg.Warn("key proxy resolve failed", "provider", ref.ProviderSlug, "key", ke.Name, "err", terr.Error())
+				lg.Info("req<", "status", 502, "key", ke.Name)
+				return true
+			}
+			for _, tgt := range keyTargets {
+				client, cerr := s.pool.ClientFor(tgt.Type, tgt.URL)
+				if cerr != nil {
+					lg.Warn("proxy client failed", "provider", ref.ProviderSlug, "key", ke.Name, "proxy", tgt.Name, "err", cerr.Error())
+					if tgt.Name != "" {
+						s.st.ProxyHealth.SetError(tgt.Name, cerr.Error())
+					}
+					lastErr = cerr
+					if st := parseUpstreamStatus(cerr); st != 0 {
+						lastStatus = st
+					}
+					// Key dipatok ke proxy sendiri: gagalkan request, tanpa failover.
+					if noFallback {
+						writeErr(w, http.StatusBadGateway, proxyFailMsg(tgt, cerr), "server_error", "bad_gateway")
+						lg.Info("req<", "status", 502, "key", ke.Name, "proxy", tgt.Name)
+						return true
+					}
+					continue
+				}
+				run := &upstreamRun{
+					s: s, w: w, r: r, lg: lg, ref: ref, client: client, tgt: tgt,
+					upURL: upURL, upBody: upBody, timeout: timeout, stream: stream,
+					singleTry: singleTry, ring: []*config.KeyEntry{ke}, healthy: hasHealthy,
+					healthModelID: healthModelID, callerHash: callerHash, callerName: callerName,
+				}
+				res := run.exec(&tried)
+				if res == runServed {
+					return true
+				}
+				if run.lastErr != nil {
+					lastErr = run.lastErr
+				}
+				if run.lastStatus != 0 {
+					lastStatus = run.lastStatus
+					lastRetryAfter = run.lastRetryAfter
+				} else if run.lastErr != nil {
+					if st := parseUpstreamStatus(run.lastErr); st != 0 {
+						lastStatus = st
+					}
+				}
+				// Key dipatok ke proxy sendiri: pool mati -> gagalkan request,
+				// tanpa failover ke pool maupun key lain.
+				if res == runProxyDead && noFallback {
+					writeErr(w, http.StatusBadGateway, proxyFailMsg(tgt, run.lastErr), "server_error", "bad_gateway")
+					lg.Info("req<", "status", 502, "key", ke.Name, "proxy", tgt.Name)
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if runPass(eligible) {
+		return
+	}
+
+	// Short-wait anti-503-thrash: bila belum ada yang dicoba (semua key
+	// cooling/flagged), tunggu singkat 500ms lalu hitung ulang eligible
+	// sekali; hanya bila masih 0 baru 503. Bila ada yang pulih, coba satu
+	// pass tambahan agar request tidak gagal sia-sia.
+	if tried == 0 {
+		time.Sleep(500 * time.Millisecond)
+		eligible2, healthy2 := s.eligibleForKeys(ring, ref.ProviderSlug)
+		if singleTry && len(eligible2) > 1 {
+			eligible2 = eligible2[:1]
+		}
+		if len(eligible2) == 0 {
+			writeErr(w, http.StatusServiceUnavailable, "all keys cooling down, retry shortly", "server_error", "all_keys_cooling_down")
+			lg.Info("req<", "status", 503, "provider", ref.ProviderSlug)
 			return
 		}
-		for _, tgt := range keyTargets {
-			client, cerr := s.pool.ClientFor(tgt.Type, tgt.URL)
-			if cerr != nil {
-				lg.Warn("proxy client failed", "provider", ref.ProviderSlug, "key", ke.Name, "proxy", tgt.Name, "err", cerr.Error())
-				if tgt.Name != "" {
-					s.st.ProxyHealth.SetError(tgt.Name, cerr.Error())
-				}
-				lastErr = cerr
-				// Key dipatok ke proxy sendiri: gagalkan request, tanpa failover.
-				if noFallback {
-					writeErr(w, http.StatusBadGateway, proxyFailMsg(tgt, cerr), "server_error", "bad_gateway")
-					lg.Info("req<", "status", 502, "key", ke.Name, "proxy", tgt.Name)
-					return
-				}
-				continue
-			}
-			run := &upstreamRun{
-				s: s, w: w, r: r, lg: lg, ref: ref, client: client, tgt: tgt,
-				upURL: upURL, upBody: upBody, timeout: timeout, stream: stream,
-				singleTry: singleTry, ring: []*config.KeyEntry{ke}, healthy: hasHealthy,
-				healthModelID: healthModelID, callerHash: callerHash, callerName: callerName,
-			}
-			res := run.exec(&tried)
-			if res == runServed {
-				return
-			}
-			if run.lastErr != nil {
-				lastErr = run.lastErr
-			}
-			// Key dipatok ke proxy sendiri: pool mati -> gagalkan request,
-			// tanpa failover ke pool maupun key lain.
-			if res == runProxyDead && noFallback {
-				writeErr(w, http.StatusBadGateway, proxyFailMsg(tgt, run.lastErr), "server_error", "bad_gateway")
-				lg.Info("req<", "status", 502, "key", ke.Name, "proxy", tgt.Name)
-				return
-			}
+		hasHealthy = healthy2
+		if runPass(eligible2) {
+			return
 		}
 	}
 
@@ -462,8 +489,71 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
 	}
+	// Forward status upstream terakhir bila diketahui (langsung dari
+	// run.lastStatus, fallback parse lastErr), bukan selalu 502 generik.
+	// 503 di sini hanya untuk tried==0 (di atas).
+	if lastStatus != 0 {
+		if lastRetryAfter != "" {
+			w.Header().Set("Retry-After", lastRetryAfter)
+		}
+		writeErr(w, lastStatus, msg, "server_error", "bad_gateway")
+		lg.Info("req<", "status", lastStatus)
+		return
+	}
 	writeErr(w, http.StatusBadGateway, msg, "server_error", "bad_gateway")
 	lg.Info("req<", "status", 502)
+}
+
+// eligibleForKeys membangun daftar key yang boleh dicoba: buang yang sedang
+// cooldown, dan buang yang flagged error selama masih ada key sehat
+// (last-resort: semua dipakai agar tidak outage total). Mengembalikan daftar
+// plus penanda apakah ada key sehat. Diekstrak agar pass ulang short-wait
+// memakai aturan yang sama persis.
+func (s *Server) eligibleForKeys(ring []*config.KeyEntry, slug string) ([]*config.KeyEntry, bool) {
+	hasHealthy := false
+	for _, ke := range ring {
+		if ke == nil {
+			continue
+		}
+		id := service.CooldownKey(slug, ke.Name)
+		if s.st.Cooldown(id) || s.st.ProvHealth.IsError(id) {
+			continue
+		}
+		hasHealthy = true
+		break
+	}
+	eligible := make([]*config.KeyEntry, 0, len(ring))
+	for _, ke := range ring {
+		if ke == nil {
+			continue
+		}
+		id := service.CooldownKey(slug, ke.Name)
+		if s.st.Cooldown(id) {
+			continue
+		}
+		if hasHealthy && s.st.ProvHealth.IsError(id) {
+			continue
+		}
+		eligible = append(eligible, ke)
+	}
+	return eligible, hasHealthy
+}
+
+// parseUpstreamStatus mengekstrak status HTTP terakhir dari string error
+// ("upstream HTTP NNN") tanpa coupling ke struct upstreamRun. Hanya status
+// yang dikenal di-forward (401/403/408/429/500/502/503/504); selain itu 0
+// (caller fallback ke 502 generik seperti lama).
+func parseUpstreamStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	msg := err.Error()
+	for _, code := range []int{401, 403, 408, 429, 500, 502, 503, 504} {
+		if strings.Contains(msg, "upstream HTTP "+strconv.Itoa(code)) {
+			return code
+		}
+	}
+	return 0
 }
 
 type flushWriter struct {

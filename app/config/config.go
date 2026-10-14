@@ -43,6 +43,7 @@ type Provider struct {
 	Interface   string              `json:"interface"`
 	BaseURL     string              `json:"baseUrl"`
 	Proxy       string              `json:"proxy,omitempty"` // nama pool di ProxyPools, "" = direct
+	KeyStrategy string              `json:"keyStrategy,omitempty"` // ""/ordered = failover urutan Order, "round" = rotasi start per-request
 	Enabled     FlexBool            `json:"enabled"`
 	TimeoutSecs FlexInt             `json:"timeoutSecs"`
 	Keys        map[string]*ProvKey `json:"keys"`
@@ -80,6 +81,12 @@ const (
 const (
 	ProxyModeAuto  = "auto"  // pakai semua pool enabled berurutan order, failover ke pool berikutnya
 	ProxyModeRound = "round" // sama seperti auto tapi urutan awal berotasi (round robin)
+)
+
+// Strategi pemilihan key per-provider.
+const (
+	KeyStrategyOrdered = "ordered" // failover urutan Order (default)
+	KeyStrategyRound   = "round"   // rotasi start per-request (bagi beban)
 )
 
 type ProxyPool struct {
@@ -246,6 +253,15 @@ func ProxyModeOf(s string) (string, bool) {
 		return ProxyModeRound, true
 	}
 	return "", false
+}
+
+// IsKeyRound melaporkan apakah provider memakai strategi key round-robin.
+// Nil-safe: nil → false. Hanya true bila KeyStrategy (trim+lower) == "round".
+func (p *Provider) IsKeyRound() bool {
+	if p == nil {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(p.KeyStrategy)) == KeyStrategyRound
 }
 
 func Load(path string) (*Snapshot, error) {
@@ -423,6 +439,13 @@ func validateAndNormalize(cfg *Config) error {
 			} else if _, ok := cfg.ProxyPools[prov.Proxy]; !ok {
 				return fmt.Errorf("%s.proxy: pool %q not found in proxyPools (use a pool name, %q, or %q)", base, prov.Proxy, ProxyModeAuto, ProxyModeRound)
 			}
+		}
+
+		prov.KeyStrategy = strings.ToLower(strings.TrimSpace(prov.KeyStrategy))
+		switch prov.KeyStrategy {
+		case "", KeyStrategyOrdered, KeyStrategyRound:
+		default:
+			return fmt.Errorf("%s.keyStrategy: must be \"ordered\" or \"round\"", base)
 		}
 
 		if len(prov.Keys) == 0 {

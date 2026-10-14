@@ -258,6 +258,23 @@ func (st *Store) NextRoundRobin(providerSlug string, n int) int {
 	return int(cur % uint64(n))
 }
 
+// NextKeyIndex identik dengan NextRoundRobin tetapi memakai namespace
+// "keys:"+slug agar kursor rotasi key terpisah dari kursor proxy.
+func (st *Store) NextKeyIndex(slug string, n int) int {
+	if st == nil || n <= 0 {
+		return 0
+	}
+	st.rrMu.Lock()
+	defer st.rrMu.Unlock()
+	if st.roundRobin == nil {
+		st.roundRobin = map[string]uint64{}
+	}
+	key := "keys:" + slug
+	cur := st.roundRobin[key]
+	st.roundRobin[key] = cur + 1
+	return int(cur % uint64(n))
+}
+
 func statKey(provider, model string) string {
 	return provider + "|" + model
 }

@@ -16,6 +16,11 @@ const proxyRetestInterval = 60 * time.Second
 //   - pool yang sudah di-flag error diturunkan prioritasnya: bila masih ada
 //     pool sehat, yang flagged di-skip; bila semua flagged, semuanya dipakai
 //     (last-resort, anti-outage) — sama seperti aturan key.
+//
+// Catatan: round robin KEY tidak ditangani di sini melainkan di
+// server.go:handleProxy (kursor namespace "keys:"+slug, aktif hanya bila
+// provider mengimplementasikan IsKeyRound() bool). File ini sengaja tidak
+// mengubah logic proxy (no-op aman untuk workstream driver).
 func (s *Server) proxyCandidates(snap *config.Snapshot, slug string, prov *config.Provider) ([]service.ProxyTarget, error) {
 	targets, err := service.ResolveProxies(snap, prov)
 	if err != nil {
