@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -172,5 +174,81 @@ func TestCooldownForStatus(t *testing.T) {
 	}
 	if got := CooldownForStatus(400, ""); got != 0 {
 		t.Errorf("CooldownForStatus(400,empty) = %v, want 0", got)
+	}
+}
+
+func TestIsProxyConnectFailure(t *testing.T) {
+	proxy := "http://proxy.example.com:8080"
+	cases := []struct {
+		name  string
+		typ   string
+		proxy string
+		err   error
+		want  bool
+	}{
+		{"nil", "http", proxy, nil, false},
+		{"canceled", "http", proxy, context.Canceled, false},
+		{"canceled-wrapped", "http", proxy, errors.Join(context.Canceled, errors.New("client cancel")), false},
+		{"deadline", "http", proxy, context.DeadlineExceeded, true},
+		{"proxy-host-refused", "http", proxy, errors.New(`proxyconnect tcp: dial tcp 1.2.3.4:8080: connect: connection refused`), true},
+		{"proxyconnect-generic", "http", "http://other-proxy:3128", errors.New("proxyconnect tcp: dial tcp: connection refused"), true},
+		{"pool-bad-hostname", "http", "http://badhost.invalid:8080", errors.New(`proxyconnect tcp: dial tcp: lookup badhost.invalid: no such host`), true},
+		{"host-gated-refused", "http", proxy, errors.New(`Get "https://api.openai.com": dial tcp proxy.example.com:8080: connection refused`), true},
+		{"host-gated-reset", "http", proxy, errors.New(`dial proxy.example.com: connection reset by peer`), true},
+		{"host-gated-timeout", "http", proxy, errors.New(`dial proxy.example.com: i/o timeout`), true},
+		{"proxy-auth", "http", proxy, errors.New("Proxy Authentication Required"), true},
+		{"proxy-error", "http", proxy, errors.New("proxy error: tunnel connection failed"), true},
+		{"tunnel-failed", "http", proxy, errors.New("tunnel connection failed"), true},
+		{"no-such-host", "http", proxy, errors.New(`dial tcp: lookup api.openai.com: no such host`), false},
+		{"x509", "http", proxy, errors.New(`x509: certificate signed by unknown authority`), false},
+		{"certificate", "http", proxy, errors.New(`tls: failed to verify certificate: expired`), false},
+		{"tls-handshake", "http", proxy, errors.New(`tls handshake timeout`), false},
+		{"handshake-failure", "http", proxy, errors.New(`remote error: tls: handshake failure`), false},
+		{"eof-unknown-http", "http", proxy, errors.New(`Post "https://api.example.com/v1/chat/completions": EOF`), true},
+		{"reset-unknown-http", "http", proxy, errors.New(`read: connection reset by peer`), true},
+		{"relay-eof", "relay", "https://relay.example.com", errors.New(`Post "https://api.example.com/v1/chat/completions": EOF`), true},
+		{"relay-no-such-host", "relay", "https://badrelay.invalid", errors.New(`dial tcp: lookup badrelay.invalid: no such host`), true},
+		{"relay-x509", "relay", "https://relay.example.com", errors.New(`x509: certificate signed by unknown authority`), true},
+		{"relay-canceled", "relay", "https://relay.example.com", context.Canceled, false},
+		{"relay-nil", "relay", "https://relay.example.com", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsProxyConnectFailure(c.typ, c.proxy, c.err); got != c.want {
+			t.Errorf("%s: IsProxyConnectFailure = %v, want %v (err=%v)", c.name, got, c.want, c.err)
+		}
+	}
+}
+
+func TestProxyFailureKind(t *testing.T) {
+	proxy := "http://proxy.example.com:8080"
+	if !ProxyFailureKind("http", proxy, 407, nil) {
+		t.Errorf("ProxyFailureKind(407,nil) = false, want true")
+	}
+	if !ProxyFailureKind("http", proxy, 407, errors.New("anything")) {
+		t.Errorf("ProxyFailureKind(407,err) = false, want true")
+	}
+	if ProxyFailureKind("http", proxy, 500, nil) {
+		t.Errorf("ProxyFailureKind(500,nil) = true, want false")
+	}
+	if ProxyFailureKind("http", proxy, 429, nil) {
+		t.Errorf("ProxyFailureKind(429,nil) = true, want false")
+	}
+	if ProxyFailureKind("http", proxy, 401, nil) {
+		t.Errorf("ProxyFailureKind(401,nil) = true, want false")
+	}
+	if ProxyFailureKind("http", proxy, 200, nil) {
+		t.Errorf("ProxyFailureKind(200,nil) = true, want false")
+	}
+	if !ProxyFailureKind("http", proxy, 0, errors.New("proxyconnect tcp: connection refused")) {
+		t.Errorf("ProxyFailureKind(err=proxyconnect) = false, want true")
+	}
+	if ProxyFailureKind("http", proxy, 0, errors.New("no such host")) {
+		t.Errorf("ProxyFailureKind(err=no such host) = true, want false")
+	}
+	if ProxyFailureKind("http", proxy, 500, errors.New("no such host")) {
+		t.Errorf("ProxyFailureKind(500, no such host) = true, want false")
+	}
+	if !ProxyFailureKind("relay", "https://relay.example.com", 0, errors.New(`Post "https://x/v1": EOF`)) {
+		t.Errorf("ProxyFailureKind(relay, EOF) = false, want true")
 	}
 }

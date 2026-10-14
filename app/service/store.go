@@ -20,6 +20,16 @@ const ModelAutoFlagThreshold = 3
 // sebelum pool di-flag error dan request pindah ke pool berikutnya.
 const ProxyFailThreshold = 3
 
+// ProxyFailWindow: jendela akumulasi kegagalan proxy. Counter gagal
+// di-reset bila kegagalan sebelumnya lebih tua dari jendela ini.
+const ProxyFailWindow = 30 * time.Second
+
+// proxyFailWindow menghitung kegagalan proxy dalam jendela waktu.
+type proxyFailWindow struct {
+	n     int
+	since time.Time
+}
+
 // modelFailState menghitung consecutive failures satu model (FullID).
 type modelFailState struct {
 	n    int
@@ -61,7 +71,7 @@ type Store struct {
 	// proxyFails menghitung consecutive gagal per pool proxy (nama) untuk
 	// auto-flag. Sukses me-reset counter (lihat NoteProxyResult).
 	proxyFailMu sync.Mutex
-	proxyFails  map[string]int
+	proxyFails  map[string]proxyFailWindow
 
 	// roundRobin menyimpan kursor rotasi per provider untuk mode "round".
 	rrMu       sync.Mutex
@@ -78,7 +88,7 @@ func NewStore(s *config.Snapshot) *Store {
 		latSum:      map[string]int64{},
 		latCount:    map[string]uint64{},
 		modelFails:  map[string]modelFailState{},
-		proxyFails:  map[string]int{},
+		proxyFails:  map[string]proxyFailWindow{},
 		roundRobin:  map[string]uint64{},
 		ProxyHealth: NewProxyHealth(),
 		ProvHealth:  NewProvHealth(),
@@ -232,14 +242,21 @@ func (st *Store) NoteProxyResult(name string, ok bool) int {
 	st.proxyFailMu.Lock()
 	defer st.proxyFailMu.Unlock()
 	if st.proxyFails == nil {
-		st.proxyFails = map[string]int{}
+		st.proxyFails = map[string]proxyFailWindow{}
 	}
 	if ok {
 		delete(st.proxyFails, name)
 		return 0
 	}
-	st.proxyFails[name]++
-	return st.proxyFails[name]
+	now := time.Now()
+	fw := st.proxyFails[name]
+	if fw.n == 0 || now.Sub(fw.since) > ProxyFailWindow {
+		fw = proxyFailWindow{n: 1, since: now}
+	} else {
+		fw.n++
+	}
+	st.proxyFails[name] = fw
+	return fw.n
 }
 
 // NextRoundRobin mengembalikan index awal (0..n-1) untuk mode "round" dan

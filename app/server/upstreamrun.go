@@ -80,6 +80,12 @@ func snippet(b []byte, n int) string {
 	return s
 }
 
+// isProxySideFault mendelegasikan ke service.ProxyFailureKind (klasifikasi
+// pool-side vs upstream-side, sadar-tipe relay/http) dengan pool target saat ini.
+func isProxySideFault(proxyType, proxyURL string, status int, err error) bool {
+	return service.ProxyFailureKind(proxyType, proxyURL, status, err)
+}
+
 // proxyLabel mengembalikan nama pool untuk log ("direct" bila tanpa pool).
 func (u *upstreamRun) proxyLabel() string {
 	if u.tgt.Name == "" {
@@ -136,6 +142,11 @@ func (u *upstreamRun) exec(triedKeys *int) proxyRun {
 				advance = true
 			case attemptProxyFail:
 				u.lastErr = out.err
+				if out.err != nil && strings.Contains(out.err.Error(), "407") {
+					u.s.st.ProxyHealth.SetError(u.tgt.Name, out.err.Error())
+					u.lg.Warn("proxy flagged error", "provider", u.ref.ProviderSlug, "proxy", u.tgt.Name, "failFast", "407", "err", out.err.Error())
+					return runProxyDead
+				}
 				n := u.s.st.NoteProxyResult(u.tgt.Name, false)
 				if n >= service.ProxyFailThreshold {
 					u.s.st.ProxyHealth.SetError(u.tgt.Name, out.err.Error())
@@ -177,6 +188,13 @@ func (u *upstreamRun) attempt(ke *config.KeyEntry, keyID string) attemptOutcome 
 		cancel()
 		u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, el.Milliseconds(), true)
 		if service.IsProxyFailure(0, err) && u.tgt.Name != "" {
+			if !isProxySideFault(u.tgt.Type, u.tgt.URL, 0, err) {
+				// Bukan sisi-proxy (mis. DNS/TLS upstream): jangan merahkan pool; perlakukan sebagai UpstreamRetry.
+				u.lastErr = err
+				u.s.st.MarkCooldown(keyID, 60*time.Second)
+				u.lg.Warn("up<", "provider", u.ref.ProviderSlug, "key", ke.Name, "err", err.Error(), "latencyMs", el.Milliseconds())
+				return attemptOutcome{kind: attemptUpstreamRetry, err: err}
+			}
 			u.lg.Warn("up<", "provider", u.ref.ProviderSlug, "proxy", u.tgt.Name, "err", err.Error(), "latencyMs", el.Milliseconds())
 			return attemptOutcome{kind: attemptProxyFail, err: err}
 		}
@@ -195,7 +213,7 @@ func (u *upstreamRun) attempt(ke *config.KeyEntry, keyID string) attemptOutcome 
 		cancel()
 		u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, ttft.Milliseconds(), true)
 		u.lg.Warn("up<", "provider", u.ref.ProviderSlug, "proxy", u.tgt.Name, "status", resp.StatusCode)
-		return attemptOutcome{kind: attemptProxyFail, err: fmt.Errorf("upstream HTTP %d", resp.StatusCode)}
+		return attemptOutcome{kind: attemptProxyFail, err: fmt.Errorf("upstream HTTP %d no-retry", resp.StatusCode)}
 	}
 
 	// 401/403/408: key bermasalah/transien -> coba key berikutnya

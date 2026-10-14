@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -360,6 +361,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		timeout = 300 * time.Second
 	}
 
+	// Budget global per-request: cap total waktu semua attempt (semua key x
+	// semua target x kedua pass) agar request K×N pool mati tidak
+	// menggantung berlipat-lipat. Deadline di-share pass-1 dan pass-2.
+	budget := 120 * time.Second
+	deadline := time.Now().Add(budget)
+
 	healthModelID := service.ProvModelID(ref.ProviderSlug, ref.ModelSlug)
 	// Model flagged: satu percobaan saja (key sehat pertama), tanpa failover.
 	// Gagal -> flag dipertahankan, error upstream diteruskan ke requester.
@@ -382,7 +389,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Request masuk: silent re-test key & proxy ber-flag di background
 	// (self-heal), tanpa mengganggu response ini.
 	s.maybeRetestKeys(snap, ref.ProviderSlug, ref.Provider)
-	s.maybeRetestProxies(snap, retestTargets(targets, snap, eligible))
+	s.maybeRetestProxies(snap, ref.Provider, eligible)
 
 	// Driver: key di loop luar (tiap key bisa punya proxy sendiri yang
 	// meng-override proxy provider), target proxy key di loop dalam.
@@ -393,6 +400,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	lastStatus := 0
 	lastRetryAfter := ""
+	// Short-circuit per-request: pool yang terbukti mati dalam request ini
+	// di-skip untuk key berikutnya. Di-share dan diakumulasi antar pass
+	// (pass-1 dan pass-2/short-wait) dalam request yang sama.
+	deadThisReq := map[string]bool{}
 	// runPass menjalankan satu pass key x target. done=true berarti respons
 	// sudah ditulis (served atau terminal noFallback) -> caller harus return.
 	runPass := func(keys []*config.KeyEntry) (done bool) {
@@ -405,6 +416,17 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return true
 			}
 			for _, tgt := range keyTargets {
+				// Budget global habis: hentikan pass, jatuh ke handler akhir
+				// yang me-forward 502/pesan budget (return false = belum served).
+				if time.Now().After(deadline) {
+					lastErr = fmt.Errorf("request budget exceeded")
+					return false
+				}
+				// Short-circuit per-request: pool mati dalam request ini
+				// tidak diulang untuk key berikutnya (hemat K×3 waste).
+				if tgt.Name != "" && deadThisReq[tgt.Name] {
+					continue
+				}
 				client, cerr := s.pool.ClientFor(tgt.Type, tgt.URL)
 				if cerr != nil {
 					lg.Warn("proxy client failed", "provider", ref.ProviderSlug, "key", ke.Name, "proxy", tgt.Name, "err", cerr.Error())
@@ -423,13 +445,27 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 					}
 					continue
 				}
+				// Timeout attempt dipotong sisa budget (lantai 5s agar attempt
+				// tak langsung mati saat budget hampir habis).
+				to := timeout
+				if rem := time.Until(deadline); rem < to {
+					to = rem
+				}
+				if to < 5*time.Second {
+					to = 5 * time.Second
+				}
 				run := &upstreamRun{
 					s: s, w: w, r: r, lg: lg, ref: ref, client: client, tgt: tgt,
-					upURL: upURL, upBody: upBody, timeout: timeout, stream: stream,
+					upURL: upURL, upBody: upBody, timeout: to, stream: stream,
 					singleTry: singleTry, ring: []*config.KeyEntry{ke}, healthy: hasHealthy,
 					healthModelID: healthModelID, callerHash: callerHash, callerName: callerName,
 				}
 				res := run.exec(&tried)
+				// Short-circuit per-request: tandai pool mati agar key
+				// berikutnya (dan pass-2) melewatinya.
+				if res == runProxyDead && tgt.Name != "" {
+					deadThisReq[tgt.Name] = true
+				}
 				if res == runServed {
 					return true
 				}

@@ -103,6 +103,38 @@ func (p *ProxyHealth) ErrMsg(name string) string {
 	return p.bad[name].Msg
 }
 
+// ErrAt mengembalikan unix timestamp terakhir SetError (0 bila tidak flagged/nil).
+func (p *ProxyHealth) ErrAt(name string) int64 {
+	if p == nil || name == "" {
+		return 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.bad[name]
+	if !ok {
+		return 0
+	}
+	return e.At
+}
+
+// ErrAge mengembalikan umur error (now - At, 0 bila tidak flagged).
+func (p *ProxyHealth) ErrAge(name string) time.Duration {
+	if p == nil || name == "" {
+		return 0
+	}
+	p.mu.RLock()
+	e, ok := p.bad[name]
+	p.mu.RUnlock()
+	if !ok {
+		return 0
+	}
+	d := time.Since(time.Unix(e.At, 0))
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
 // Snapshot menyalin status error (nama -> pesan) untuk pembaca lain.
 func (p *ProxyHealth) Snapshot() map[string]string {
 	if p == nil {

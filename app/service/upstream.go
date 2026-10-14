@@ -250,6 +250,96 @@ func isRetryableNetErr(err error) bool {
 	return false
 }
 
+// IsProxyConnectFailure melaporkan apakah error transport jelas terjadi di hop
+// pool (bukan upstream). proxyType membedakan dua dunia:
+//   - relay: client hanya dial ke relay; fetch upstream terjadi di sisi relay
+//     dan kegagalannya kembali sebagai status HTTP, bukan transport error.
+//     Maka SEMUA transport error non-cancel adalah salah relay.
+//   - http (forward): dial ke proxy, lalu TLS end-to-end ke upstream. Sinyal
+//     TLS/x509 dan DNS telanjang adalah ranah upstream; sinyal proxyconnect,
+//     host-gated, dan unknown (dial targetnya memang proxy) adalah salah pool.
+func IsProxyConnectFailure(proxyType, proxyURL string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if normalizeProxyType(proxyType) == config.ProxyTypeRelay {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+
+	// Sinyal generik hop-proxy (tanpa perlu host match). Dicek dulu agar
+	// hostname pool yang salah ("proxyconnect … no such host") tetap true.
+	for _, s := range []string{
+		"proxyconnect",
+		"proxy connect",
+		"proxy auth",
+		"proxy error",
+		"tunnel connection failed",
+		"connect: connection refused",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+
+	// Sinyal upstream (TLS end-to-end / DNS telanjang): bukan salah pool.
+	for _, s := range []string{
+		"no such host",
+		"x509",
+		"certificate",
+		"tls handshake",
+		"handshake failure",
+	} {
+		if strings.Contains(msg, s) {
+			return false
+		}
+	}
+
+	// Sinyal host-gated: msg harus menyebut host proxy DAN jenis gagal konek.
+	proxyHost := ""
+	if u, perr := url.Parse(proxyURL); perr == nil && u.Host != "" {
+		proxyHost = strings.ToLower(u.Hostname())
+		if proxyHost == "" {
+			proxyHost = strings.ToLower(u.Host)
+		}
+	}
+	if proxyHost != "" && strings.Contains(msg, proxyHost) {
+		for _, s := range []string{
+			"connection refused",
+			"connection reset",
+			"timed out",
+			"timeout",
+			"no route to host",
+		} {
+			if strings.Contains(msg, s) {
+				return true
+			}
+		}
+	}
+	// Unknown via forward proxy: dial targetnya adalah proxy itu sendiri,
+	// jadi perlakukan sebagai salah pool (pertahankan failover lama).
+	return true
+}
+
+// ProxyFailureKind true bila ini murni salah pool: status 407, atau error
+// transport yang jelas di hop pool (lihat IsProxyConnectFailure).
+// Status lain tanpa err (429/5xx/401/...) adalah ranah key/upstream, bukan pool.
+func ProxyFailureKind(proxyType, proxyURL string, status int, err error) bool {
+	if status == 407 {
+		return true
+	}
+	if err != nil {
+		return IsProxyConnectFailure(proxyType, proxyURL, err)
+	}
+	return false
+}
+
 // DefaultProxyTestURL dipakai bila config tidak menentukan proxyTestUrl.
 // Endpoint 204 ringan yang umum dipakai untuk cek konektivitas.
 const DefaultProxyTestURL = "https://www.gstatic.com/generate_204"
