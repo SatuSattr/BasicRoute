@@ -48,6 +48,118 @@ type Provider struct {
 	TimeoutSecs FlexInt             `json:"timeoutSecs"`
 	Keys        map[string]*ProvKey `json:"keys"`
 	Models      map[string]*Model   `json:"models"`
+	// ModelsAuto true bila config memakai "models": "auto" (fetch GET /models
+	// upstream, memory only). Tidak di-marshal dari JSON secara langsung;
+	// diisi oleh UnmarshalJSON custom di bawah.
+	ModelsAuto bool `json:"-"`
+}
+
+// IsModelsAuto melaporkan apakah provider memakai mode fetch otomatis.
+func (p *Provider) IsModelsAuto() bool {
+	return p != nil && p.ModelsAuto
+}
+
+// rawProvider adalah bayangan Provider untuk parsing polimorfik field models.
+type rawProvider struct {
+	Name        string              `json:"name"`
+	Prefix      string              `json:"prefix"`
+	Type        string              `json:"type"`
+	Interface   string              `json:"interface"`
+	BaseURL     string              `json:"baseUrl"`
+	Proxy       string              `json:"proxy,omitempty"`
+	KeyStrategy string              `json:"keyStrategy,omitempty"`
+	Enabled     FlexBool            `json:"enabled"`
+	TimeoutSecs FlexInt             `json:"timeoutSecs"`
+	Keys        map[string]*ProvKey `json:"keys"`
+	Models      json.RawMessage     `json:"models"`
+}
+
+var allowedProviderFields = map[string]bool{
+	"name": true, "prefix": true, "type": true, "interface": true,
+	"baseUrl": true, "proxy": true, "keyStrategy": true, "enabled": true,
+	"timeoutSecs": true, "keys": true, "models": true,
+}
+
+// UnmarshalJSON menerima dua bentuk "models": object map (statis, seperti
+// dulu) atau string "auto" (fetch otomatis). Unknown field tetap ditolak agar
+// perilaku strict DisallowUnknownFields tidak hilang.
+func (p *Provider) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for k := range fields {
+		if !allowedProviderFields[k] {
+			return fmt.Errorf("providers: unknown field %q", k)
+		}
+	}
+	var raw rawProvider
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	p.Name = raw.Name
+	p.Prefix = raw.Prefix
+	p.Type = raw.Type
+	p.Interface = raw.Interface
+	p.BaseURL = raw.BaseURL
+	p.Proxy = raw.Proxy
+	p.KeyStrategy = raw.KeyStrategy
+	p.Enabled = raw.Enabled
+	p.TimeoutSecs = raw.TimeoutSecs
+	p.Keys = raw.Keys
+	p.ModelsAuto = false
+	p.Models = nil
+	if len(raw.Models) == 0 || strings.TrimSpace(string(raw.Models)) == "null" {
+		return nil // validasi (required) ditangani validateAndNormalize
+	}
+	trimmed := strings.TrimSpace(string(raw.Models))
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw.Models, &s); err != nil {
+			return fmt.Errorf("models: %w", err)
+		}
+		if strings.EqualFold(strings.TrimSpace(s), "auto") {
+			p.ModelsAuto = true
+			p.Models = map[string]*Model{}
+			return nil
+		}
+		return fmt.Errorf("models: must be \"auto\" or an object map, got %q", s)
+	}
+	var m map[string]*Model
+	if err := json.Unmarshal(raw.Models, &m); err != nil {
+		return fmt.Errorf("models: %w", err)
+	}
+	p.Models = m
+	return nil
+}
+
+// MarshalJSON mengembalikan bentuk semula: string "auto" bila ModelsAuto,
+// object map bila statis.
+func (p Provider) MarshalJSON() ([]byte, error) {
+	type outProvider struct {
+		Name        string              `json:"name"`
+		Prefix      string              `json:"prefix"`
+		Type        string              `json:"type"`
+		Interface   string              `json:"interface"`
+		BaseURL     string              `json:"baseUrl"`
+		Proxy       string              `json:"proxy,omitempty"`
+		KeyStrategy string              `json:"keyStrategy,omitempty"`
+		Enabled     FlexBool            `json:"enabled"`
+		TimeoutSecs FlexInt             `json:"timeoutSecs"`
+		Keys        map[string]*ProvKey `json:"keys"`
+		Models      any                 `json:"models"`
+	}
+	o := outProvider{
+		Name: p.Name, Prefix: p.Prefix, Type: p.Type, Interface: p.Interface,
+		BaseURL: p.BaseURL, Proxy: p.Proxy, KeyStrategy: p.KeyStrategy,
+		Enabled: p.Enabled, TimeoutSecs: p.TimeoutSecs, Keys: p.Keys,
+	}
+	if p.ModelsAuto {
+		o.Models = "auto"
+	} else {
+		o.Models = p.Models
+	}
+	return json.Marshal(o)
 }
 
 type ProvKey struct {
@@ -485,11 +597,14 @@ func validateAndNormalize(cfg *Config) error {
 			}
 		}
 
-		if len(prov.Models) == 0 {
-			return fmt.Errorf("%s.models: at least 1 model required", base)
+		if len(prov.Models) == 0 && !prov.IsModelsAuto() {
+			return fmt.Errorf("%s.models: at least 1 model required (or \"auto\")", base)
 		}
 		enabledModels := 0
 		for mslug, m := range prov.Models {
+			if prov.IsModelsAuto() {
+				break // auto: tidak ada model statis untuk divalidasi
+			}
 			mb := fmt.Sprintf("%s.models[%q]", base, mslug)
 			if m == nil {
 				return fmt.Errorf("%s: entry null", mb)
@@ -520,7 +635,7 @@ func validateAndNormalize(cfg *Config) error {
 			if enabledKeys == 0 {
 				return fmt.Errorf("%s.keys: enabled provider needs >=1 enabled key", base)
 			}
-			if enabledModels == 0 {
+			if !prov.IsModelsAuto() && enabledModels == 0 {
 				return fmt.Errorf("%s.models: enabled provider needs >=1 enabled model", base)
 			}
 		}

@@ -157,12 +157,20 @@ func printStatus(out io.Writer, d Deps) {
 	provOn := 0
 	modelTotal := 0
 	modelOn := len(snap.ModelMap)
-	for _, p := range snap.Raw.Providers {
+	for slug, p := range snap.Raw.Providers {
 		if p != nil && bool(p.Enabled) {
 			provOn++
 		}
 		if p != nil {
-			modelTotal += len(p.Models)
+			if p.IsModelsAuto() {
+				for _, ref := range snap.ModelMap {
+					if ref != nil && ref.ProviderSlug == slug {
+						modelTotal++
+					}
+				}
+			} else {
+				modelTotal += len(p.Models)
+			}
 		}
 	}
 	poolTotal := len(snap.Raw.ProxyPools)
@@ -284,6 +292,15 @@ func printProviders(out io.Writer, d Deps) {
 		}
 		keysOn, keysTotal := countKeys(p.Keys)
 		modelsOn, modelsTotal := countModels(p.Models)
+		if p.IsModelsAuto() {
+			n := 0
+			for _, ref := range snap.ModelMap {
+				if ref != nil && ref.ProviderSlug == slug {
+					n++
+				}
+			}
+			modelsOn, modelsTotal = n, n
+		}
 		proxy := service.ProxyModeShort(snap, p)
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%d/%d\t%ds\n",
 			slug, p.Prefix, p.Name, onOff(bool(p.Enabled)), p.Interface, proxy,
@@ -315,6 +332,12 @@ func printProviderDetail(out io.Writer, d Deps, arg string) {
 	fmt.Fprintf(tw, "  baseUrl\t%s\n", p.BaseURL)
 	fmt.Fprintf(tw, "  proxy\t%s\n", proxy)
 	fmt.Fprintf(tw, "  timeout\t%ds\n", int(p.TimeoutSecs))
+	if p.IsModelsAuto() {
+		fmt.Fprintf(tw, "  models\t%s\n", autoModelsLabel(d, snap, slug))
+		if msg := d.Store.ProvHealth.ErrMsg(service.ProvProviderID(slug)); msg != "" {
+			fmt.Fprintf(tw, "  error\t%s\n", msg)
+		}
+	}
 	_ = tw.Flush()
 
 	// Keys terurut order.
@@ -358,16 +381,21 @@ func printProviderDetail(out io.Writer, d Deps, arg string) {
 	}
 	_ = tw2.Flush()
 
-	// Models terurut slug.
-	mslugs := make([]string, 0, len(p.Models))
-	for m := range p.Models {
-		mslugs = append(mslugs, m)
-	}
-	sort.Strings(mslugs)
+	// Models terurut slug (auto: dari ModelMap hasil fetch, ctx/out "-").
+	mslugs := autoModelSlugs(snap, slug, p)
 	fmt.Fprintf(out, "  models (%d):\n", len(mslugs))
 	tw3 := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw3, "    SLUG\tFULL ID\tSTATUS\tCONTEXT\tOUTPUT\tCREATED")
 	for _, m := range mslugs {
+		if p.IsModelsAuto() {
+			ref := snap.ModelMap[p.Prefix+"/"+m]
+			created := "-"
+			if ref != nil && ref.Model != nil && int64(ref.Model.Created) > 0 {
+				created = formatCreated(int64(ref.Model.Created))
+			}
+			fmt.Fprintf(tw3, "    %s\t%s/%s\t%s\t-\t-\t%s\n", m, p.Prefix, m, onOff(true), created)
+			continue
+		}
 		md := p.Models[m]
 		if md == nil {
 			fmt.Fprintf(tw3, "    %s\t%s/%s\t(null)\t-\t-\t-\n", m, p.Prefix, m)
@@ -518,30 +546,32 @@ func printModels(out io.Writer, d Deps, filter string) {
 	type mrow struct {
 		full, slug, prov string
 		on               bool
-		ctx, out         int
+		ctx, out         string
 	}
 	var rows []mrow
-	for slug, p := range snap.Raw.Providers {
-		if p == nil {
+	// Sumber: ModelMap (mencakup statis enabled + auto hasil fetch).
+	for full, ref := range snap.ModelMap {
+		if ref == nil || ref.Provider == nil {
 			continue
 		}
-		// filter boleh cocok ke slug provider / prefix / fullID.
-		for mslug, md := range p.Models {
-			full := p.Prefix + "/" + mslug
-			if filter != "" &&
-				!strings.Contains(strings.ToLower(full), filter) &&
-				!strings.Contains(strings.ToLower(slug), filter) &&
-				!strings.Contains(strings.ToLower(p.Prefix), filter) {
-				continue
-			}
-			r := mrow{full: full, slug: mslug, prov: slug}
-			if md != nil {
-				r.on = bool(md.Enabled) && bool(p.Enabled)
-				r.ctx = int(md.Limit.Context)
-				r.out = int(md.Limit.Output)
-			}
-			rows = append(rows, r)
+		slug := ref.ProviderSlug
+		p := ref.Provider
+		if filter != "" &&
+			!strings.Contains(strings.ToLower(full), filter) &&
+			!strings.Contains(strings.ToLower(slug), filter) &&
+			!strings.Contains(strings.ToLower(p.Prefix), filter) {
+			continue
 		}
+		r := mrow{full: full, slug: ref.ModelSlug, prov: slug, on: bool(p.Enabled)}
+		if p.IsModelsAuto() {
+			r.ctx, r.out = "-", "-"
+		} else if ref.Model != nil {
+			r.ctx = itoaOrDash(int(ref.Model.Limit.Context))
+			r.out = itoaOrDash(int(ref.Model.Limit.Output))
+		} else {
+			r.ctx, r.out = "-", "-"
+		}
+		rows = append(rows, r)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].full < rows[j].full })
 	if len(rows) == 0 {
@@ -555,7 +585,7 @@ func printModels(out io.Writer, d Deps, filter string) {
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "FULL ID\tPROVIDER\tSTATUS\tCONTEXT\tOUTPUT")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\n", r.full, r.prov, onOff(r.on), r.ctx, r.out)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.full, r.prov, onOff(r.on), r.ctx, r.out)
 	}
 	_ = tw.Flush()
 }
@@ -677,6 +707,57 @@ func countModels(m map[string]*config.Model) (on, total int) {
 		}
 	}
 	return on, total
+}
+
+// autoModelSlugs mengembalikan slug model terurut: auto dari ModelMap,
+// statis dari p.Models.
+func autoModelSlugs(snap *config.Snapshot, slug string, p *config.Provider) []string {
+	if p == nil {
+		return nil
+	}
+	if p.IsModelsAuto() {
+		var out []string
+		for _, ref := range snap.ModelMap {
+			if ref != nil && ref.ProviderSlug == slug {
+				out = append(out, ref.ModelSlug)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	out := make([]string, 0, len(p.Models))
+	for m := range p.Models {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// autoModelsLabel merangkum status fetch auto untuk tampilan detail.
+func autoModelsLabel(d Deps, snap *config.Snapshot, slug string) string {
+	n := 0
+	for _, ref := range snap.ModelMap {
+		if ref != nil && ref.ProviderSlug == slug {
+			n++
+		}
+	}
+	if d.Store != nil && d.Store.ProvHealth != nil {
+		pid := service.ProvProviderID(slug)
+		switch {
+		case d.Store.ProvHealth.IsTesting(pid):
+			return "auto (fetching…)"
+		case d.Store.ProvHealth.IsError(pid):
+			return "auto (error)"
+		}
+	}
+	return fmt.Sprintf("auto (%d fetched)", n)
+}
+
+func itoaOrDash(n int) string {
+	if n <= 0 {
+		return "-"
+	}
+	return fmt.Sprint(n)
 }
 
 func lookupProvider(snap *config.Snapshot, arg string) (string, *config.Provider) {

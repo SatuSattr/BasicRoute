@@ -32,6 +32,13 @@ func ProvModelID(providerSlug, modelSlug string) string {
 	return providerSlug + "|" + modelSlug
 }
 
+// ProvProviderID membangun identity provider-level (untuk mode models:auto):
+// "provider:"+slug. Prefix berbeda dari key/model agar tidak tabrakan dengan
+// CooldownKey(slug,keyName) maupun ProvModelID.
+func ProvProviderID(providerSlug string) string {
+	return "provider:" + providerSlug
+}
+
 func NewProvHealth() *ProvHealth {
 	return &ProvHealth{bad: map[string]provErr{}, testing: map[string]bool{}}
 }

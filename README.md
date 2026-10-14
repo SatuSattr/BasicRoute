@@ -65,6 +65,8 @@ At least one provider is required. The map key is the internal slug; the public 
 
 Model entry: `{ "name", "enabled", "limit": { "context", "output" }, "created?" }`. `limit.context` and `limit.output` must be > 0 (internal routing info, not exposed via `/v1/models`). `created` is an optional unix timestamp for the `created` field in `/v1/models` (`0` / absent = omitted). Only enabled models of enabled providers are served, and every `prefix/model` ID must be globally unique.
 
+Alternatively, `"models": "auto"` fetches the model list from the provider's own `GET {baseUrl}/models` endpoint (OpenAI-compatible) instead of declaring models statically. The fetch runs async at boot and on every reload (memory only, never written to config): keys are tried in `order` sequence across all proxy candidates (full `auto`/`round` failover), auth-invalid keys are skipped, and the first success wins. While fetching, the provider dot in the UI is yellow; green on success (models appear in `/v1/models`, tables, and chat routing with `CTX`/`OUT` shown as `-` since upstream provides no limits), red on failure when all keys fail. A red provider shows its error message when selected in the Provider table and in `provider <slug>`.
+
 ### `proxyPools`
 
 May be empty (`{}`) — then every provider connects direct.

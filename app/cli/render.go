@@ -80,14 +80,22 @@ func Summarize(d Deps) Summary {
 	}
 	s.ProvTotal = len(snap.Raw.Providers)
 	s.ModelOn = len(snap.ModelMap)
-	for _, p := range snap.Raw.Providers {
+	for slug, p := range snap.Raw.Providers {
 		if p == nil {
 			continue
 		}
 		if bool(p.Enabled) {
 			s.ProvOn++
 		}
-		s.ModelTotal += len(p.Models)
+		if p.IsModelsAuto() {
+			for _, ref := range snap.ModelMap {
+				if ref != nil && ref.ProviderSlug == slug {
+					s.ModelTotal++
+				}
+			}
+		} else {
+			s.ModelTotal += len(p.Models)
+		}
 	}
 	s.PoolTotal = len(snap.Raw.ProxyPools)
 	for _, p := range snap.Raw.ProxyPools {

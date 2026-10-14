@@ -76,6 +76,8 @@
         },
       },
       "models": {
+        // Or: "models": "auto" — fetch the model list from GET {baseUrl}/models
+        // using the first valid key in order (memory only, refreshed on every reload).
         "acme-large": {
           "name": "Acme Large",
           "enabled": true,

@@ -22,6 +22,9 @@ type provCard struct {
 	typ                   string
 	proxy                 string
 	enabled               bool
+	err                   bool // provider-level flagged (models:auto fetch gagal)
+	testing               bool // provider-level fetching (models:auto)
+	auto                  bool // models:auto
 	keysOn, keysTotal     int
 	modelsOn, modelsTotal int
 }
@@ -44,6 +47,12 @@ func (m Model) provCards() []provCard {
 			name:    p.Name,
 			typ:     p.Type,
 			enabled: bool(p.Enabled),
+			auto:    p.IsModelsAuto(),
+		}
+		if m.deps.Store != nil && m.deps.Store.ProvHealth != nil {
+			pid := service.ProvProviderID(slug)
+			c.err = m.deps.Store.ProvHealth.IsError(pid)
+			c.testing = m.deps.Store.ProvHealth.IsTesting(pid)
 		}
 		for _, k := range p.Keys {
 			c.keysTotal++
@@ -51,16 +60,49 @@ func (m Model) provCards() []provCard {
 				c.keysOn++
 			}
 		}
-		for _, md := range p.Models {
-			c.modelsTotal++
-			if md != nil && bool(md.Enabled) {
-				c.modelsOn++
+		if p.IsModelsAuto() {
+			n := 0
+			for _, ref := range snap.ModelMap {
+				if ref != nil && ref.ProviderSlug == slug {
+					n++
+				}
+			}
+			c.modelsOn, c.modelsTotal = n, n
+		} else {
+			for _, md := range p.Models {
+				c.modelsTotal++
+				if md != nil && bool(md.Enabled) {
+					c.modelsOn++
+				}
 			}
 		}
 		c.proxy = service.ProxyModeShort(snap, p)
 		out = append(out, c)
 	}
 	return out
+}
+
+// provLevelDot memilih style dot untuk baris provider di tabel list:
+// kuning (fetching auto), merah (fetch gagal), abu (disabled), hijau (sehat).
+func provLevelDot(c provCard) lipgloss.Style {
+	switch {
+	case c.testing:
+		return styleDotTest
+	case !c.enabled:
+		return styleDotOff
+	case c.err:
+		return styleDotErr
+	default:
+		return styleDotOn
+	}
+}
+
+// provLevelErr mengembalikan pesan error provider-level ("" bila sehat).
+func (m Model) provLevelErr(slug string) string {
+	if m.deps.Store == nil || m.deps.Store.ProvHealth == nil {
+		return ""
+	}
+	return m.deps.Store.ProvHealth.ErrMsg(service.ProvProviderID(slug))
 }
 
 // provTypeStyle returns the text style for the TYPE column.
@@ -106,10 +148,7 @@ func (m Model) providersTableView(f frame) string {
 	vis = append(vis, header)
 	for idx := start; idx < end; idx++ {
 		c := cards[idx]
-		ds := styleDotOff
-		if c.enabled {
-			ds = styleDotOn
-		}
+		ds := provLevelDot(c)
 		plain := "• " + padRight(c.name, nW) + padRight(c.typ, tW) +
 			padRight(fmt.Sprintf("%d/%d", c.keysOn, c.keysTotal), kW) +
 			padRight(fmt.Sprintf("%d/%d", c.modelsOn, c.modelsTotal), mW) + c.proxy
@@ -129,6 +168,13 @@ func (m Model) providersTableView(f frame) string {
 	}
 	for len(vis) < vp {
 		vis = append(vis, "")
+	}
+	// Baris dasar: keterangan error provider-level yang sedang di-select
+	// (fetch auto gagal), agar terlihat seperti error key/model di detail.
+	if len(vis) > 0 && f.cursor >= 0 && f.cursor < len(cards) {
+		if msg := m.provLevelErr(cards[f.cursor].slug); msg != "" {
+			vis[len(vis)-1] = styleErr.Render(trunc(fmt.Sprintf("provider %q error: %s", cards[f.cursor].slug, msg), inner))
+		}
 	}
 	return styleWin.Width(m.width-2).Render(strings.Join(vis, "\n")) + "\n"
 }
@@ -318,6 +364,10 @@ func (m Model) provErrLine(slug string, cursor int) string {
 	if _, p := lookupProv(m.deps.Store.Get(), slug); p == nil || !bool(p.Enabled) {
 		return ""
 	}
+	// Provider-level dulu (models:auto fetch gagal): tampil tanpa peduli cursor.
+	if msg := m.deps.Store.ProvHealth.ErrMsg(service.ProvProviderID(slug)); msg != "" {
+		return fmt.Sprintf("provider %q error: %s", slug, msg)
+	}
 	ids := m.provRowIDs(slug)
 	if cursor < 0 || cursor >= len(ids) {
 		return ""
@@ -357,10 +407,18 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 	var out []dline
 	var keys, models []int
 
-	// Judul: indikator status di depan nama.
+	// Judul: indikator status di depan nama (provider-level auto diutamakan).
 	ds := styleDotOn
 	if !bool(p.Enabled) {
 		ds = styleDotOff
+	} else if m.deps.Store != nil && m.deps.Store.ProvHealth != nil {
+		pid := service.ProvProviderID(slug)
+		switch {
+		case m.deps.Store.ProvHealth.IsTesting(pid):
+			ds = styleDotTest
+		case m.deps.Store.ProvHealth.IsError(pid):
+			ds = styleDotErr
+		}
 	}
 	out = append(out, dline{[]dseg{{"• ", ds}, {p.Name, styleDetName}}})
 	out = append(out, dline{[]dseg{{"", styleBody}}})
@@ -368,12 +426,30 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 	// Seksi 1: informasi dasar.
 	out = append(out, dline{[]dseg{{"Basic info", styleSecHead}}})
 	proxy := service.ProxyModeLabel(snap, p)
+	modelsInfo := fmt.Sprintf("%d models", len(p.Models))
+	if p.IsModelsAuto() {
+		n := 0
+		for _, ref := range snap.ModelMap {
+			if ref != nil && ref.ProviderSlug == slug {
+				n++
+			}
+		}
+		switch {
+		case m.deps.Store.ProvHealth != nil && m.deps.Store.ProvHealth.IsTesting(service.ProvProviderID(slug)):
+			modelsInfo = "auto (fetching…)"
+		case m.deps.Store.ProvHealth != nil && m.deps.Store.ProvHealth.IsError(service.ProvProviderID(slug)):
+			modelsInfo = "auto (error)"
+		default:
+			modelsInfo = fmt.Sprintf("auto (%d fetched)", n)
+		}
+	}
 	info := [][2]string{
 		{"prefix", p.Prefix},
 		{"type", p.Type},
 		{"interface", p.Interface},
 		{"base-url", p.BaseURL},
 		{"proxy", proxy},
+		{"models", modelsInfo},
 		{"timeout", fmt.Sprintf("%ds", int(p.TimeoutSecs))},
 	}
 	labW := 0
@@ -461,18 +537,24 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 		}
 	}
 
-	// Seksi 3: models.
-	mslugs := make([]string, 0, len(p.Models))
-	for ms := range p.Models {
-		mslugs = append(mslugs, ms)
-	}
-	sort.Strings(mslugs)
+	// Seksi 3: models (auto: dari ModelMap hasil fetch, limit tampil "-").
+	mslugs := m.provModelSlugs(snap, slug, p)
 
 	out = append(out, dline{[]dseg{{"", styleBody}}})
 	out = append(out, dline{[]dseg{{strings.Repeat("─", inner), styleSep}}})
 	out = append(out, dline{[]dseg{{fmt.Sprintf("Models (%d)", len(mslugs)), styleSecHead}}})
 	if len(mslugs) == 0 {
-		out = append(out, dline{[]dseg{{"(no models)", styleDetLbl}}})
+		if p.IsModelsAuto() {
+			if m.deps.Store.ProvHealth != nil && m.deps.Store.ProvHealth.IsTesting(service.ProvProviderID(slug)) {
+				out = append(out, dline{[]dseg{{"(fetching models…)", styleDetLbl}}})
+			} else if m.deps.Store.ProvHealth != nil && m.deps.Store.ProvHealth.IsError(service.ProvProviderID(slug)) {
+				out = append(out, dline{[]dseg{{"(fetch failed — see error below)", styleDetLbl}}})
+			} else {
+				out = append(out, dline{[]dseg{{"(no models fetched yet)", styleDetLbl}}})
+			}
+		} else {
+			out = append(out, dline{[]dseg{{"(no models)", styleDetLbl}}})
+		}
 	} else {
 		sW, fW, cW, oW := runeLen("NAME"), runeLen("FULL ID"), runeLen("CTX"), runeLen("OUT")
 		type mrow struct {
@@ -483,7 +565,23 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 		for _, ms := range mslugs {
 			md := p.Models[ms]
 			r := mrow{slug: ms, name: ms, full: p.Prefix + "/" + ms}
-			if md != nil {
+			if p.IsModelsAuto() {
+				// Hasil fetch: nama=id, limit unknown ("-"), created dari upstream.
+				r.on = true
+				r.ctx, r.out = "-", "-"
+				if ref := snap.ModelMap[p.Prefix+"/"+ms]; ref != nil && ref.Model != nil {
+					if strings.TrimSpace(ref.Model.Name) != "" {
+						r.name = ref.Model.Name
+					}
+					if int64(ref.Model.Created) > 0 {
+						r.created = time.Unix(int64(ref.Model.Created), 0).Format("2006-01-02")
+					} else {
+						r.created = "-"
+					}
+				} else {
+					r.created = "-"
+				}
+			} else if md != nil {
 				if strings.TrimSpace(md.Name) != "" {
 					r.name = md.Name
 				}
@@ -530,6 +628,30 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 	return out, keys, models
 }
 
+// provModelSlugs mengembalikan slug model terurut untuk detail/rows:
+// auto → dari ModelMap hasil fetch; statis → dari p.Models.
+func (m Model) provModelSlugs(snap *config.Snapshot, slug string, p *config.Provider) []string {
+	if p == nil {
+		return nil
+	}
+	if p.IsModelsAuto() {
+		var out []string
+		for _, ref := range snap.ModelMap {
+			if ref != nil && ref.ProviderSlug == slug {
+				out = append(out, ref.ModelSlug)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	out := make([]string, 0, len(p.Models))
+	for ms := range p.Models {
+		out = append(out, ms)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // provRowID mengidentifikasi satu baris selectable di domain cursor datar.
 type provRowID struct {
 	isKey bool
@@ -573,12 +695,12 @@ func (m Model) provRowIDs(slug string) []provRowID {
 	for _, r := range krows {
 		out = append(out, provRowID{isKey: true, name: r.name, label: r.name, on: r.on})
 	}
-	mslugs := make([]string, 0, len(p.Models))
-	for ms := range p.Models {
-		mslugs = append(mslugs, ms)
-	}
-	sort.Strings(mslugs)
+	mslugs := m.provModelSlugs(snap, slug, p)
 	for _, ms := range mslugs {
+		if p.IsModelsAuto() {
+			out = append(out, provRowID{name: ms, label: ms, on: true})
+			continue
+		}
 		md := p.Models[ms]
 		label := ms
 		on := false

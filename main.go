@@ -68,6 +68,7 @@ func main() {
 	pool := service.NewPool()
 	srv := server.New(st, pool, log, int(snap.Raw.System.Limits.MaxBodyMB))
 	handler := srv.Handler()
+	go st.RefreshAutoModels(log)
 
 	addr := fmt.Sprintf("%s:%d", snap.Raw.System.Host, snap.Raw.System.Port)
 	boot := time.Now()
@@ -102,6 +103,7 @@ func main() {
 		st.SetDraining(false)
 		log.Info("reload ok", "gen", st.Gen())
 		logModels(log, staged)
+		go st.RefreshAutoModels(log)
 	}
 
 	var shutdownOnce sync.Once
