@@ -2,7 +2,7 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Palet abu-abu / hitam / putih, plus hijau/merah untuk indikator status.
+// Gray/black/white palette, plus green/red status indicators.
 var (
 	colPaper = lipgloss.Color("#FEFEFE") // teks utama / judul
 	colText  = lipgloss.Color("#D6D6D6") // isi
@@ -16,7 +16,7 @@ var (
 )
 
 var (
-	// Header: "BasicRoute" bold #FEFEFE, "v1.0" lebih gelap.
+	// Header: bold "BasicRoute", dimmer version.
 	styleTitle   = lipgloss.NewStyle().Bold(true).Foreground(colPaper)
 	styleVersion = lipgloss.NewStyle().Foreground(colFaint)
 
@@ -46,22 +46,14 @@ var (
 	styleStatus  = lipgloss.NewStyle().Foreground(colText)
 	styleErr     = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(colPaper)
 
-	// Kartu provider: border redup, yang terpilih border terang + nama underline.
-	styleCard       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colLine).Padding(0, 1)
-	styleCardSel    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colPaper).Padding(0, 1)
-	styleCardName   = lipgloss.NewStyle().Bold(true).Foreground(colPaper)
-	styleCardNameOD = lipgloss.NewStyle().Bold(true).Foreground(colDim)
-	styleCardNameSl = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(colPaper)
-	styleCardLbl    = lipgloss.NewStyle().Foreground(colDim)
-	styleCardVal    = lipgloss.NewStyle().Foreground(colText)
-	styleCardURL    = lipgloss.NewStyle().Foreground(colDim)
-	styleDotOn      = lipgloss.NewStyle().Bold(true).Foreground(colGreen)
-	styleDotOff     = lipgloss.NewStyle().Foreground(colDim)
-	styleDotErr     = lipgloss.NewStyle().Bold(true).Foreground(colRed)
-	styleDotTest    = lipgloss.NewStyle().Bold(true).Foreground(colAmber)
-	styleCardSel2   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colText).Padding(0, 1)
+	// Provider table: type column uses bright white.
+	styleProvType = lipgloss.NewStyle().Bold(true).Foreground(colPaper)
+	styleDotOn    = lipgloss.NewStyle().Bold(true).Foreground(colGreen)
+	styleDotOff   = lipgloss.NewStyle().Foreground(colDim)
+	styleDotErr   = lipgloss.NewStyle().Bold(true).Foreground(colRed)
+	styleDotTest  = lipgloss.NewStyle().Bold(true).Foreground(colAmber)
 
-	// Detail provider: judul nama, kepala seksi, label vs nilai, pemisah.
+	// Provider detail: name title, section heads, label vs value, separator.
 	styleDetName = lipgloss.NewStyle().Bold(true).Foreground(colPaper)
 	styleSecHead = lipgloss.NewStyle().Bold(true).Foreground(colText)
 	styleDetLbl  = lipgloss.NewStyle().Foreground(colDim)

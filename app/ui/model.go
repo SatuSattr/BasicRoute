@@ -816,65 +816,55 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case pgProviders:
 		cards := m.provCards()
 		n := len(cards)
-		cols := m.provCols(n)
+		if n > 0 {
+			f.cursor = clamp(f.cursor, 0, n-1)
+		}
+		// Linear table navigation, single cursor.
+		step := m.viewportH() - 1
+		if step < 1 {
+			step = 1
+		}
 		switch key {
-		case "left", "h":
-			if n > 0 {
-				f.cursor = (f.cursor + n - 1) % n
-				m.setCur(f)
-				m.ensureCardVisible()
-			}
-		case "right", "l":
-			if n > 0 {
-				f.cursor = (f.cursor + 1) % n
-				m.setCur(f)
-				m.ensureCardVisible()
-			}
 		case "up", "k":
-			if n > 0 {
-				c := f.cursor
-				if c-cols >= 0 {
-					c -= cols
-				} else {
-					for c+cols < n {
-						c += cols
-					}
-				}
-				f.cursor = c
+			if n > 0 && f.cursor > 0 {
+				f.cursor--
 				m.setCur(f)
-				m.ensureCardVisible()
+				m.ensureProvidersVisible()
 			}
 		case "down", "j":
-			if n > 0 {
-				c := f.cursor
-				if c+cols < n {
-					c += cols
-				} else {
-					c = c % cols
-					if c >= n {
-						c = n - 1
-					}
-				}
-				f.cursor = c
+			if n > 0 && f.cursor < n-1 {
+				f.cursor++
 				m.setCur(f)
-				m.ensureCardVisible()
+				m.ensureProvidersVisible()
 			}
 		case "enter", " ":
 			if f.cursor >= 0 && f.cursor < n {
 				m.push(frame{pg: pgProvider, arg: cards[f.cursor].slug})
 			}
 		case "pgup":
-			f.scroll -= m.provVisRows()
-			m.setCur(f)
+			if n > 0 {
+				f.cursor = clamp(f.cursor-step, 0, n-1)
+				m.setCur(f)
+				m.ensureProvidersVisible()
+			}
 		case "pgdown":
-			f.scroll += m.provVisRows()
-			m.setCur(f)
+			if n > 0 {
+				f.cursor = clamp(f.cursor+step, 0, n-1)
+				m.setCur(f)
+				m.ensureProvidersVisible()
+			}
 		case "home", "g":
-			f.scroll = 0
-			m.setCur(f)
+			if n > 0 {
+				f.cursor = 0
+				m.setCur(f)
+				m.ensureProvidersVisible()
+			}
 		case "end", "G":
-			f.scroll = 1 << 30
-			m.setCur(f)
+			if n > 0 {
+				f.cursor = n - 1
+				m.setCur(f)
+				m.ensureProvidersVisible()
+			}
 		}
 	case pgAPIKeys:
 		names := m.sysKeyNames()
@@ -1081,7 +1071,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.setCur(f)
 		}
 	case pgProvider:
-		_, keyLines, modelLines := m.providerDetail(f)
+		lines, keyLines, modelLines := m.providerDetail(f)
 		nk := len(keyLines)
 		n := nk + len(modelLines)
 		if n == 0 {
@@ -1100,24 +1090,51 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "up", "k":
 			if f.cursor <= 0 {
-				break // ujung list: diam (ala Explorer, tanpa wrap)
+				// Mentok baris paling atas (row 1 Keys): geser container
+				// ke atas agar seksi Basic info bisa terlihat lagi.
+				// Tanpa ini scroll terkunci setelah scroll down.
+				if f.scroll > 0 {
+					f.scroll--
+					m.setCur(f)
+				}
+				break
 			}
 			selCollapse(&f, f.cursor-1, n) // tembus antar seksi
 			move()
 		case "down", "j":
 			if f.cursor >= n-1 {
+				// Simetris: mentok baris paling bawah, geser container
+				// ke bawah satu baris (dijepit ke maxScroll).
+				maxS := maxScroll(len(lines), m.viewportH())
+				if f.scroll < maxS {
+					f.scroll++
+					m.setCur(f)
+				}
 				break
 			}
 			selCollapse(&f, f.cursor+1, n)
 			move()
 		case "shift+up", "K":
 			if f.cursor <= lo {
+				// Hanya di ujung absolut atas (lo==0) boleh scroll;
+				// batas antar-seksi tetap diam agar seleksi tak hilang.
+				if lo == 0 && f.scroll > 0 {
+					f.scroll--
+					m.setCur(f)
+				}
 				break // ujung seksi: diam, jangan tembus/pindah
 			}
 			selExtend(&f, f.cursor-1, lo, hi)
 			move()
 		case "shift+down", "J":
 			if f.cursor >= hi {
+				if hi == n-1 {
+					maxS := maxScroll(len(lines), m.viewportH())
+					if f.scroll < maxS {
+						f.scroll++
+						m.setCur(f)
+					}
+				}
 				break
 			}
 			selExtend(&f, f.cursor+1, lo, hi)
@@ -1270,8 +1287,12 @@ func (m *Model) clampAll() {
 		} else {
 			f.cursor = clamp(f.cursor, 0, n-1)
 		}
-		rows := provRows(n, m.provCols(n))
-		f.scroll = clamp(f.scroll, 0, imax(rows-m.provVisRows(), 0))
+		// Fixed 1-line header, body is viewport-1 (like the Api Key table).
+		vp := m.viewportH() - 1
+		if vp < 1 {
+			vp = 1
+		}
+		f.scroll = clamp(f.scroll, 0, maxScroll(n, vp))
 	case pgProxies:
 		n := len(m.proxyCards())
 		if n == 0 {

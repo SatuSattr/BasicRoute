@@ -84,7 +84,7 @@ func (m Model) View() string {
 		}
 		sb.WriteString("\n\n")
 		if f.pg == pgProviders {
-			sb.WriteString(m.providersGridView(f))
+			sb.WriteString(m.providersTableView(f))
 		} else {
 			sb.WriteString(m.proxiesTableView(f))
 		}
@@ -499,8 +499,8 @@ func (m Model) scrollIndicator(f frame) string {
 	case pgLogs:
 		n = len(m.logLines)
 	case pgProviders:
-		n = provRows(len(m.provCards()), m.provCols(len(m.provCards())))
-		vp = m.provVisRows()
+		// Fixed 1-line header, body is vp-1 (like the Api Key table).
+		n = len(m.provCards()) + 1
 	case pgProxies:
 		// Header fixed 1 baris, body = vp-1 (seperti tabel Api Key).
 		n = len(m.poolNames()) + 1
@@ -589,7 +589,7 @@ func (m Model) footerView() string {
 		)
 	case pgProviders:
 		return hintLine(
-			"←→↑↓", "select",
+			"↑↓", "move",
 			"Enter", "details",
 			"Esc", "back",
 			"/", "command",

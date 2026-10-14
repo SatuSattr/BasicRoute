@@ -6,9 +6,9 @@ Minimal AI proxy with a single OpenAI-compatible endpoint (`/v1/*`) multi-key fa
 
 ## Preview
 
-| Home menu | Provider cards | Proxy table |
+| Home menu | Provider table | Proxy table |
 | --------- | -------------- | ----------- |
-| <img src="preview/home.png" width="300" alt="Home menu"> | <img src="preview/provider.png" width="300" alt="Provider cards"> | <img src="preview/proxy.png" width="300" alt="Proxy table"> |
+| <img src="preview/home.png" width="300" alt="Home menu"> | <img src="preview/provider.png" width="300" alt="Provider table"> | <img src="preview/proxy.png" width="300" alt="Proxy table"> |
 
 ## Running
 
@@ -147,7 +147,7 @@ When stdin is an interactive terminal, BasicRoute opens a fullscreen TUI (gray/b
 
 | Key              | Action                                                             |
 | ---------------- | ------------------------------------------------------------------ |
-| `↑`/`↓`/`←`/`→`  | move menu / card selection (grid wraps around)                     |
+| `↑`/`↓`/`←`/`→`  | move menu / table selection (home menu wraps around)               |
 | `Enter`          | open page / provider / proxy detail                                |
 | `Esc`            | back                                                               |
 | `x` (Api Key)    | reveal / mask all keys                                             |
@@ -163,7 +163,7 @@ When stdin is an interactive terminal, BasicRoute opens a fullscreen TUI (gray/b
 | `r`              | reload config                                                      |
 | `q` / `Ctrl+C`   | graceful shutdown                                                  |
 
-Pages: **Api Key** (system key table: `NAMA | KEYS | TOTAL TOKENS | LAST`, green `•` = enabled, gray = disabled, `x` reveals/masks all keys, totals + last-request refresh every 3 s while the page is open, `-` = never used; Explorer-style selectable table), **Logs** (dedicated slog window, follows tail, `End` re-follows), **Provider** (responsive card grid: `•` name, inline `Keys: a/b  Models: c/d`, `Proxy:` showing `direct` / pool name / `auto (n)` / `round (n)` — green `•` = enabled, gray = disabled — → detail with _Basic info_, _Keys_, _Models_ sections, Keys table `NAME | ORDER | COOLDOWN | PROXY | KEY` where `PROXY` shows the effective per-key proxy (`direct` / pool name, dimmed when inherited from the provider), Models table, both Explorer-style selectable, `t` tests the focused row or all selected rows), **Proxy** (table: `NAME | TYPE | ORDER | CLIENTS | URL` termasking, rows sorted by `order` — yellow `•` = testing, green `•` = enabled, gray = disabled, red `•` = flagged error — `t` tests the highlighted pool, `y` tests the selected pools; a red pool is deprioritized on the request path — see failover below).
+Pages: **Api Key** (system key table: `NAMA | KEYS | TOTAL TOKENS | LAST`, green `•` = enabled, gray = disabled, `x` reveals/masks all keys, totals + last-request refresh every 3 s while the page is open, `-` = never used; Explorer-style selectable table), **Logs** (dedicated slog window, follows tail, `End` re-follows), **Provider** (table: `NAME | TYPE | KEYS | MODELS | PROXY` — green `•` = enabled, gray = disabled — → detail with _Basic info_, _Keys_, _Models_ sections, Keys table `NAME | ORDER | COOLDOWN | PROXY | KEY` where `PROXY` shows the effective per-key proxy (`direct` / pool name, dimmed when inherited from the provider), Models table, both Explorer-style selectable, `t` tests the focused row or all selected rows), **Proxy** (table: `NAME | TYPE | ORDER | CLIENTS | URL` termasking, rows sorted by `order` — yellow `•` = testing, green `•` = enabled, gray = disabled, red `•` = flagged error — `t` tests the highlighted pool, `y` tests the selected pools; a red pool is deprioritized on the request path — see failover below).
 
 Provider health flags (memory only, `t` in detail or automatic): while a row is being tested its `•` is yellow, then turns green (ok) or red (error). A disabled provider grays every `•` in its detail page (title, keys and models), even rows that are enabled or flagged — nothing is served, so stale flags are not shown. A red `•` means key/model flagged error; selecting a flagged row shows the full error message at the bottom of the container. A flagged key is skipped by incoming requests while a healthy key exists (last-resort: all flagged keys are still tried) and is silently re-tested in the background (min. 60 s per provider) — recovery clears the flag. A flagged model gets exactly one retry: success clears the flag and serves the request; failure keeps the flag and returns the upstream error. A healthy model that keeps failing is auto-flagged after 3 consecutive non-2xx, non-auth, non-429 responses; any success resets the counter. Auth failures (401/403) flag the key instead of the model.
 

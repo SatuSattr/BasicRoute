@@ -13,27 +13,20 @@ import (
 	"basicroute/app/service"
 )
 
-// ---- daftar provider sebagai kartu (grid responsif ala flexbox) ----
+// ---- provider list as a table (like the Api Key / Proxy pages) ----
 
-const (
-	provCardW   = 26 // lebar total kartu, termasuk border
-	provCardGap = 2  // spasi antar kartu
-	provCardH   = 5  // tinggi kartu: 3 baris isi + 2 border
-)
-
-// provCard adalah ringkasan satu provider untuk kartu.
+// provCard is one provider row summary.
 type provCard struct {
 	slug                  string
 	name                  string
-	prefix                string
-	baseURL               string
+	typ                   string
 	proxy                 string
 	enabled               bool
 	keysOn, keysTotal     int
 	modelsOn, modelsTotal int
 }
 
-// provCards membaca ringkasan provider live dari Store, terurut slug.
+// provCards reads the live provider summary from the Store, sorted by slug.
 func (m Model) provCards() []provCard {
 	snap := m.deps.Store.Get()
 	if snap == nil || snap.Raw == nil {
@@ -49,8 +42,7 @@ func (m Model) provCards() []provCard {
 		c := provCard{
 			slug:    slug,
 			name:    p.Name,
-			prefix:  p.Prefix,
-			baseURL: p.BaseURL,
+			typ:     p.Type,
 			enabled: bool(p.Enabled),
 		}
 		for _, k := range p.Keys {
@@ -71,130 +63,94 @@ func (m Model) provCards() []provCard {
 	return out
 }
 
-// provCols menghitung jumlah kolom dari lebar terminal (responsif).
-func (m Model) provCols(n int) int {
-	if n <= 0 {
-		return 1
-	}
-	cols := (m.innerW() + provCardGap) / (provCardW + provCardGap)
-	if cols < 1 {
-		cols = 1
-	}
-	if cols > n {
-		cols = n
-	}
-	return cols
+// provTypeStyle returns the text style for the TYPE column.
+func provTypeStyle(_ string) lipgloss.Style {
+	return styleProvType
 }
 
-func provRows(n, cols int) int {
-	if n <= 0 || cols <= 0 {
-		return 0
-	}
-	return (n + cols - 1) / cols
-}
-
-// provVisRows: baris kartu yang muat di viewport (sisakan 2 baris info).
-func (m Model) provVisRows() int {
-	vr := (m.viewportH() - 1) / (provCardH + 1)
-	if vr < 1 {
-		vr = 1
-	}
-	return vr
-}
-
-// renderProvCard menggambar satu kartu (lebar tetap provCardW).
-func (m Model) renderProvCard(c provCard, sel bool) string {
-	w := provCardW - 4 // isi: border 2 + padding 2
-
-	ns := styleCardName
-	ds := styleDotOn
-	if !c.enabled {
-		ds = styleDotOff
-		if !sel {
-			ns = styleCardNameOD
-		}
-	}
-	if sel {
-		ns = styleCardNameSl
-	}
-	l1 := dline{[]dseg{{"• ", ds}, {c.name, ns}}}.render(w)
-	l2 := dline{[]dseg{
-		{"Keys: ", styleCardLbl},
-		{fmt.Sprintf("%d/%d", c.keysOn, c.keysTotal), styleCardVal},
-		{"  Models: ", styleCardLbl},
-		{fmt.Sprintf("%d/%d", c.modelsOn, c.modelsTotal), styleCardVal},
-	}}.render(w)
-	l3 := dline{[]dseg{{"Proxy: ", styleCardLbl}, {c.proxy, styleCardVal}}}.render(w)
-
-	body := strings.Join([]string{l1, l2, l3}, "\n")
-	st := styleCard.Width(provCardW - 2)
-	if sel {
-		st = styleCardSel.Width(provCardW - 2)
-	}
-	_ = m
-	return st.Render(body)
-}
-
-// providersGridView: kartu-kartu dalam window, navigasi 2D.
-func (m Model) providersGridView(f frame) string {
-	cards := m.provCards()
+// providersTableView renders NAME | TYPE | KEYS | MODELS | PROXY.
+// Fixed header, scrollable body, single-cursor selection.
+func (m Model) providersTableView(f frame) string {
+	inner := m.innerW()
 	vp := m.viewportH()
-	var body []string
-
+	cards := m.provCards()
 	if len(cards) == 0 {
-		body = []string{styleBody.Render("(no providers yet)")}
-	} else {
-		cols := m.provCols(len(cards))
-		rows := provRows(len(cards), cols)
-		vis := m.provVisRows()
-		start := clamp(f.scroll, 0, imax(rows-vis, 0))
-		end := start + vis
-		if end > rows {
-			end = rows
+		body := []string{styleBody.Render("(no providers yet)")}
+		for len(body) < vp {
+			body = append(body, "")
 		}
-		gap := strings.Repeat(" ", provCardGap)
-		for r := start; r < end; r++ {
-			var parts []string
-			for c := 0; c < cols; c++ {
-				idx := r*cols + c
-				if idx >= len(cards) {
-					break
-				}
-				if len(parts) > 0 {
-					parts = append(parts, gap)
-				}
-				parts = append(parts, m.renderProvCard(cards[idx], idx == f.cursor))
-			}
-			body = append(body, strings.Split(lipgloss.JoinHorizontal(lipgloss.Top, parts...), "\n")...)
-			if r < end-1 {
-				body = append(body, "")
-			}
-		}
+		return styleWin.Width(m.width-2).Render(strings.Join(body, "\n")) + "\n"
 	}
+	nW, tW, kW, mW := runeLen("NAME"), runeLen("TYPE"), runeLen("KEYS"), runeLen("MODELS")
+	for _, c := range cards {
+		nW = max(nW, runeLen(c.name))
+		tW = max(tW, runeLen(c.typ))
+		kW = max(kW, runeLen(fmt.Sprintf("%d/%d", c.keysOn, c.keysTotal)))
+		mW = max(mW, runeLen(fmt.Sprintf("%d/%d", c.modelsOn, c.modelsTotal)))
+	}
+	nW += 2
+	tW += 2
+	kW += 2
+	mW += 2
 
-	for len(body) < vp {
-		body = append(body, "")
+	header := dline{[]dseg{
+		{padRight("NAME", nW+2) + padRight("TYPE", tW) + padRight("KEYS", kW) + padRight("MODELS", mW) + "PROXY", styleDetLbl},
+	}}.render(inner)
+
+	start := clamp(f.scroll, 0, maxScroll(len(cards), vp-1))
+	end := start + (vp - 1)
+	if end > len(cards) {
+		end = len(cards)
 	}
-	return styleWin.Width(m.width-2).Render(strings.Join(body, "\n")) + "\n"
+	vis := make([]string, 0, vp)
+	vis = append(vis, header)
+	for idx := start; idx < end; idx++ {
+		c := cards[idx]
+		ds := styleDotOff
+		if c.enabled {
+			ds = styleDotOn
+		}
+		plain := "• " + padRight(c.name, nW) + padRight(c.typ, tW) +
+			padRight(fmt.Sprintf("%d/%d", c.keysOn, c.keysTotal), kW) +
+			padRight(fmt.Sprintf("%d/%d", c.modelsOn, c.modelsTotal), mW) + c.proxy
+		plain = trunc(plain, inner)
+		if idx == f.cursor {
+			vis = append(vis, ds.Render("• ")+styleItemSel.Width(inner-2).Render(strings.TrimPrefix(plain, "• ")))
+			continue
+		}
+		vis = append(vis, dline{[]dseg{
+			{"• ", ds},
+			{padRight(c.name, nW), styleDetVal},
+			{padRight(c.typ, tW), provTypeStyle(c.typ)},
+			{padRight(fmt.Sprintf("%d/%d", c.keysOn, c.keysTotal), kW), styleDetVal},
+			{padRight(fmt.Sprintf("%d/%d", c.modelsOn, c.modelsTotal), mW), styleDetVal},
+			{c.proxy, styleDetVal},
+		}}.render(inner))
+	}
+	for len(vis) < vp {
+		vis = append(vis, "")
+	}
+	return styleWin.Width(m.width-2).Render(strings.Join(vis, "\n")) + "\n"
 }
 
-// ensureCardVisible menggeser scroll baris agar cursor terlihat (grid provider).
-func (m *Model) ensureCardVisible() {
+// ensureProvidersVisible keeps the cursor row inside the table viewport.
+func (m *Model) ensureProvidersVisible() {
 	f := m.cur()
 	if f.pg != pgProviders {
 		return
 	}
 	n := len(m.provCards())
-	cols := m.provCols(n)
-	vis := m.provVisRows()
 	if n == 0 {
 		return
 	}
-	row := f.cursor / cols
-	if row < f.scroll {
-		f.scroll = row
-	} else if row >= f.scroll+vis {
-		f.scroll = row - vis + 1
+	vp := m.viewportH() - 1
+	if vp < 1 {
+		vp = 1
+	}
+	if f.cursor < f.scroll {
+		f.scroll = f.cursor
+	} else if f.cursor >= f.scroll+vp {
+		f.scroll = f.cursor - vp + 1
 	}
 	m.setCur(f)
 }

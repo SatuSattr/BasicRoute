@@ -163,6 +163,22 @@ func TestDisabledProviderGraysAllKeyAndModelDots(t *testing.T) {
 	}
 }
 
+func TestProvidersTableHasTypeColumn(t *testing.T) {
+	m := uiTestModel()
+	out := m.providersTableView(frame{pg: pgProviders})
+	for _, want := range []string{"NAME", "TYPE", "KEYS", "MODELS", "PROXY"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("table header missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "PREFIX") {
+		t.Fatalf("table must not show a PREFIX column:\n%s", out)
+	}
+	if !strings.Contains(out, "openai") {
+		t.Fatalf("table must show the provider type:\n%s", out)
+	}
+}
+
 func TestProviderCardProxyLabel(t *testing.T) {
 	m := uiTestModel()
 	cards := m.provCards()
