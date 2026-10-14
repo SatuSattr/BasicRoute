@@ -332,10 +332,14 @@ func (m Model) provModelTesting(slug, modelSlug string) bool {
 		m.deps.Store.ProvHealth.IsTesting(service.ProvModelID(slug, modelSlug))
 }
 
-// provDot memilih style dot baris key/model: kuning (sedang di-test),
-// merah (flagged), hijau (enabled), abu (disabled).
-func (m Model) provDot(slug string, isKey bool, name string, on bool) lipgloss.Style {
+// provDot memilih style dot baris key/model: abu (provider disabled),
+// kuning (sedang di-test), merah (flagged), hijau (enabled), abu (disabled).
+// Provider yang disabled membuat semua dot key & model-nya abu-abu, karena
+// provider itu tidak melayani request apa pun.
+func (m Model) provDot(slug string, isKey bool, name string, on, provOn bool) lipgloss.Style {
 	switch {
+	case !provOn:
+		return styleDotOff
 	case isKey && m.provKeyTesting(slug, name), !isKey && m.provModelTesting(slug, name):
 		return styleDotTest
 	case isKey && m.provKeyErr(slug, name), !isKey && m.provModelErr(slug, name):
@@ -349,8 +353,13 @@ func (m Model) provDot(slug string, isKey bool, name string, on bool) lipgloss.S
 
 // provErrLine mengembalikan baris detail error untuk baris cursor
 // (key/model), "" bila baris sehat. Dipakai di dasar container detail.
+// Provider disabled tidak menampilkan flag sama sekali (dot-nya juga abu-abu),
+// karena flag lama jadi tidak relevan.
 func (m Model) provErrLine(slug string, cursor int) string {
 	if m.deps.Store == nil || m.deps.Store.ProvHealth == nil {
+		return ""
+	}
+	if _, p := lookupProv(m.deps.Store.Get(), slug); p == nil || !bool(p.Enabled) {
 		return ""
 	}
 	ids := m.provRowIDs(slug)
@@ -426,6 +435,7 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 	}
 
 	// Seksi 2: keys (bisa di-toggle dengan x).
+	provOn := bool(p.Enabled)
 	var krows []pkeyRow
 	for n, k := range p.Keys {
 		if k == nil {
@@ -474,7 +484,7 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 			{padRight("NAME", nW+2) + padRight("ORDER", oW) + padRight("COOLDOWN", cW) + padRight("PROXY", pW) + "KEY", styleDetLbl},
 		}})
 		for _, r := range krows {
-			ds := m.provDot(slug, true, r.name, r.on)
+			ds := m.provDot(slug, true, r.name, r.on, provOn)
 			cool, cools := "-", styleDetLbl
 			if r.cool {
 				cool, cools = "cooling", styleLogWarn
@@ -549,7 +559,7 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 			{padRight("NAME", sW+2) + padRight("FULL ID", fW) + padRight("CTX", cW) + padRight("OUT", oW) + "CREATED", styleDetLbl},
 		}})
 		for _, r := range mrows {
-			ds := m.provDot(slug, false, r.slug, r.on)
+			ds := m.provDot(slug, false, r.slug, r.on, provOn)
 			out = append(out, dline{[]dseg{
 				{"• ", ds},
 				{padRight(r.name, sW), styleDetVal},

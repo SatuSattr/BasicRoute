@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"basicroute/app/config"
 	"basicroute/app/service"
 )
@@ -98,6 +100,67 @@ func providerDetailText(m Model) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// dotColors mengumpulkan warna foreground setiap indikator "• " pada baris
+// detail provider (judul, baris key, baris model).
+func dotColors(lines []dline) []lipgloss.TerminalColor {
+	var out []lipgloss.TerminalColor
+	for _, l := range lines {
+		if len(l.segs) > 0 && l.segs[0].text == "• " {
+			out = append(out, l.segs[0].st.GetForeground())
+		}
+	}
+	return out
+}
+
+// Provider disabled: semua dot key & model ikut abu-abu, walaupun key/model
+// sendiri enabled, sedang di-test, atau flagged error.
+func TestDisabledProviderGraysAllKeyAndModelDots(t *testing.T) {
+	m := uiTestModel()
+
+	// Kontrol: provider enabled + key/model enabled -> semua dot hijau.
+	lines, keyLines, modelLines := m.providerDetail(frame{pg: pgProvider, arg: "acme"})
+	if len(keyLines) == 0 || len(modelLines) == 0 {
+		t.Fatalf("expected key and model rows: keys=%v models=%v", keyLines, modelLines)
+	}
+	dots := dotColors(lines)
+	if len(dots) < 3 {
+		t.Fatalf("expected title + key + model dots, got %d", len(dots))
+	}
+	for _, c := range dots {
+		if c != colGreen {
+			t.Fatalf("enabled provider dot color = %v, want green", c)
+		}
+	}
+
+	// Precedence tetap: key flagged merah, model sedang di-test kuning.
+	m.deps.Store.ProvHealth.SetError(service.ProvKeyID("acme", "k1"), "boom")
+	m.deps.Store.ProvHealth.SetTesting(service.ProvModelID("acme", "m1"))
+	lines, _, _ = m.providerDetail(frame{pg: pgProvider, arg: "acme"})
+	seen := map[lipgloss.TerminalColor]bool{}
+	for _, c := range dotColors(lines) {
+		seen[c] = true
+	}
+	if !seen[colRed] || !seen[colAmber] {
+		t.Fatalf("flagged/testing dots must stay red/amber: %v", seen)
+	}
+
+	// Provider disabled -> semua dot abu-abu, menimpa merah/kuning.
+	m.deps.Store.Get().Raw.Providers["acme"].Enabled = config.FlexBool(false)
+	lines, keyLines, modelLines = m.providerDetail(frame{pg: pgProvider, arg: "acme"})
+	if len(keyLines) == 0 || len(modelLines) == 0 {
+		t.Fatal("key and model rows must still be listed when the provider is disabled")
+	}
+	for _, c := range dotColors(lines) {
+		if c != colDim {
+			t.Fatalf("disabled provider dot color = %v, want gray", c)
+		}
+	}
+	// Baris detail error di dasar container juga tidak ditampilkan.
+	if el := m.provErrLine("acme", 0); el != "" {
+		t.Fatalf("disabled provider must not show the error line, got %q", el)
+	}
 }
 
 func TestProviderCardProxyLabel(t *testing.T) {
