@@ -39,9 +39,9 @@ type modelFailState struct {
 type Store struct {
 	snap atomic.Pointer[config.Snapshot]
 
-	// Usage melacak total token per system key (hash -> total).
-	// Diisi di main, boleh nil pada test lama.
-	Usage *UsageTracker
+	// Data adalah penyimpan dokumen tunggal (usage), dibaca sekali saat boot
+	// dan ditulis oleh worker-nya sendiri. Diisi di main, boleh nil pada test lama.
+	Data *DataStore
 
 	// ProxyHealth menandai proxy pool yang error (memory only).
 	ProxyHealth *ProxyHealth

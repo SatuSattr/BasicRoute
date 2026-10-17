@@ -299,10 +299,10 @@ func (u *upstreamRun) serve(resp *http.Response, ke *config.KeyEntry, keyID stri
 	el := time.Since(t0)
 	ok2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
 	u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, el.Milliseconds(), !ok2xx)
-	if ok2xx && u.s.st.Usage != nil && u.callerHash != "" {
-		// Add selalu dipanggil (walau toks==0) agar waktu terakhir request
+	if ok2xx && u.s.st.Data != nil && u.callerHash != "" {
+		// AddUsage selalu dipanggil (walau toks==0) agar waktu terakhir request
 		// tercatat; tokens hanya diakumulasi bila ada.
-		u.s.st.Usage.Add(u.callerHash, u.callerName, extractTotalTokens(cap.Bytes(), sse))
+		u.s.st.Data.AddUsage(u.callerHash, u.callerName, extractTotalTokens(cap.Bytes(), sse))
 	}
 	if ok2xx {
 		// Sukses = key, model, dan pool pulih: hapus flag + reset counter.

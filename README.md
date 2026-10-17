@@ -43,7 +43,8 @@ Top-level keys: `system`, `providers`, `proxyPools`.
 | `requireAuth`      | bool   | yes      | when `true`, at least one enabled system key is required                                             |
 | `keys`             | map    | yes      | system API keys: `{ "name": { "key", "enabled" } }`; may be empty only when `requireAuth` is `false` |
 | `limits.maxBodyMB` | number | yes      | must be > 0                                                                                          |
-| `usageFile`        | string | no       | token-usage store path (default `/app/data/usage.json`); accumulated in memory, flushed every 3 min  |
+| `dataFile`         | string | no       | path to the unified JSON document store (default `/app/data/data.json`); holds the `usage` counters, kept in memory and flushed by a single writer |
+| `dataSaveIntervalSecs` | int | no    | how often (seconds) the store worker flushes to `dataFile` (default `180`); also flushed on reload and exit |
 | `proxyTestUrl`     | string | no       | URL requested when testing a proxy pool (default `https://www.gstatic.com/generate_204`)             |
 
 ### `providers`
@@ -54,14 +55,14 @@ At least one provider is required. The map key is the internal slug; the public 
 | ------------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`        | string | yes      | display name                                                                                                                            |
 | `prefix`      | string | yes      | unique, `^[a-z0-9-]+$`; served model IDs are `prefix/model`                                                                             |
-| `type`        | string | yes      | must be `"openai"` (v1)                                                                                                                 |
-| `interface`   | string | yes      | `chat-completions` or `responses-api` (upstream path follows this)                                                                      |
+| `type`        | string | yes      | `"openai"` (OpenAI-compatible)                                                                                                          |
+| `interface`   | string | openai   | `chat-completions` or `responses-api`                                                                                                   |
 | `baseUrl`     | string | yes      | `http(s)` URL; trailing `/` is trimmed automatically                                                                                    |
 | `proxy`       | string | no       | `""` (direct) or a `proxyPools` name; also `"auto"` (try all enabled pools in `order`, failover) or `"round"` (same, rotating start = round robin) |
 | `enabled`     | bool   | yes      | a disabled provider serves nothing; an enabled one needs ≥1 enabled key and ≥1 enabled model                                            |
 | `timeoutSecs` | int    | yes      | must be > 0                                                                                                                             |
 | `keys`        | map    | yes      | ≥1 entry: `{ "name": { "key", "order", "enabled", "proxy?" } }`; `order` ≥ 1 and unique per provider — enabled keys fail over in `order` sequence. `proxy` is optional (see [Per-key proxy override](#per-key-proxy-override)) |
-| `models`      | map    | yes      | ≥1 entry (see below)                                                                                                                    |
+| `models`      | map    | openai   | ≥1 entry (see below); or `"auto"` to fetch the list from the provider                                                                   |
 
 Model entry: `{ "name", "enabled", "limit": { "context", "output" }, "created?" }`. `limit.context` and `limit.output` must be > 0 (internal routing info, not exposed via `/v1/models`). `created` is an optional unix timestamp for the `created` field in `/v1/models` (`0` / absent = omitted). Only enabled models of enabled providers are served, and every `prefix/model` ID must be globally unique.
 

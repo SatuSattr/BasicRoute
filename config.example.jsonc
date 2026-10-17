@@ -3,7 +3,8 @@
     "host": "<ENV:HOST|0.0.0.0>",
     "port": "<ENV:PORT|21172>",
     "requireAuth": true,
-    "usageFile": "/app/data/usage.json",
+    "dataFile": "/app/data/data.json",
+    "dataSaveIntervalSecs": 180,
     "proxyTestUrl": "https://www.gstatic.com/generate_204",
     "keys": {
       "admin-1": {
@@ -47,46 +48,6 @@
           "name": "GPT-4o",
           "enabled": true,
           "limit": { "context": 128000, "output": 4096 },
-        },
-      },
-    },
-    "acme-eu": {
-      "name": "Acme EU",
-      "prefix": "acme",
-      "type": "openai",
-      "interface": "responses-api",
-      "baseUrl": "https://eu.acme.example/v1/",
-      "proxy": "auto",
-      "enabled": true,
-      "timeoutSecs": 90,
-      "keys": {
-        "key-1": {
-          "key": "<ENV:ACME_KEY_1|acme-key-1>",
-          "order": 1,
-          "enabled": true,
-        },
-        "key-2": {
-          "key": "<ENV:ACME_KEY_2|acme-key-2>",
-          "order": 2,
-          "enabled": true,
-          // Key ini dipatok ke satu pool: request lewat key ini selalu
-          // memakai pool-us (tanpa fallback bila pool-nya mati).
-          // Opsi lain: "" = direct, atau hapus field ini untuk ikut provider.
-          "proxy": "pool-us",
-        },
-      },
-      "models": {
-        // Or: "models": "auto" — fetch the model list from GET {baseUrl}/models
-        // using the first valid key in order (memory only, refreshed on every reload).
-        "acme-large": {
-          "name": "Acme Large",
-          "enabled": true,
-          "limit": { "context": 64000, "output": 8192 },
-        },
-        "acme-small": {
-          "name": "Acme Small",
-          "enabled": true,
-          "limit": { "context": 32000, "output": 4096 },
         },
       },
     },

@@ -12,15 +12,30 @@ import (
 // Selain test manual TUI, request yang sukses me-reset flag (self-heal)
 // dan request yang gagal beruntun bisa menaikkan flag (auto-flag).
 type ProvHealth struct {
-	mu      sync.RWMutex
-	bad     map[string]provErr // id -> error terakhir
-	testing map[string]bool    // id -> sedang di-test (kuning)
+	mu       sync.RWMutex
+	bad      map[string]provErr  // id -> error terakhir
+	testing  map[string]bool     // id -> sedang di-test (kuning)
+	progress map[string]provProg // id -> fase + progres langkah (kuning)
 }
 
 type provErr struct {
 	Msg string
 	At  int64 // unix terakhir SetError
 }
+
+// provProg melacak operasi multi-langkah yang sedang berjalan (models:auto):
+// label fase ("fetching"/"identifying") dan hitungan langkah done/total.
+type provProg struct {
+	Phase string
+	Done  int
+	Total int
+}
+
+// Fase progres provider (dipakai UI untuk teks status models).
+const (
+	ProvPhaseFetching    = "fetching"
+	ProvPhaseIdentifying = "identifying"
+)
 
 // ProvKeyID membangun identity key: slug|namaKey (sama dengan CooldownKey).
 func ProvKeyID(providerSlug, keyName string) string {
@@ -40,7 +55,7 @@ func ProvProviderID(providerSlug string) string {
 }
 
 func NewProvHealth() *ProvHealth {
-	return &ProvHealth{bad: map[string]provErr{}, testing: map[string]bool{}}
+	return &ProvHealth{bad: map[string]provErr{}, testing: map[string]bool{}, progress: map[string]provProg{}}
 }
 
 // SetTesting menandai id sedang di-test (indikator kuning).
@@ -53,7 +68,40 @@ func (p *ProvHealth) SetTesting(id string) {
 		p.testing = map[string]bool{}
 	}
 	p.testing[id] = true
+	delete(p.progress, id) // mulai bersih: fase akan di-set ulang bila berprogres
 	p.mu.Unlock()
+}
+
+// SetProgress menandai id sedang berjalan (kuning) dengan label fase dan
+// hitungan langkah (done/total). Total 0 = tak diketahui.
+func (p *ProvHealth) SetProgress(id, phase string, done, total int) {
+	if p == nil || id == "" {
+		return
+	}
+	if done < 0 {
+		done = 0
+	}
+	p.mu.Lock()
+	if p.testing == nil {
+		p.testing = map[string]bool{}
+	}
+	if p.progress == nil {
+		p.progress = map[string]provProg{}
+	}
+	p.testing[id] = true
+	p.progress[id] = provProg{Phase: phase, Done: done, Total: total}
+	p.mu.Unlock()
+}
+
+// Progress mengembalikan fase + done/total untuk id (ok=false bila tak ada).
+func (p *ProvHealth) Progress(id string) (phase string, done, total int, ok bool) {
+	if p == nil || id == "" {
+		return "", 0, 0, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pr, found := p.progress[id]
+	return pr.Phase, pr.Done, pr.Total, found
 }
 
 // ClearTesting menghapus tanda sedang di-test tanpa mengubah error.
@@ -86,7 +134,8 @@ func (p *ProvHealth) SetError(id, msg string) {
 		p.bad = map[string]provErr{}
 	}
 	p.bad[id] = provErr{Msg: msg, At: time.Now().Unix()}
-	delete(p.testing, id) // hasil sudah keluar: kuning -> merah
+	delete(p.testing, id)  // hasil sudah keluar: kuning -> merah
+	delete(p.progress, id) // progres selesai
 	p.mu.Unlock()
 }
 
@@ -97,7 +146,8 @@ func (p *ProvHealth) SetOK(id string) {
 	}
 	p.mu.Lock()
 	delete(p.bad, id)
-	delete(p.testing, id) // hasil sudah keluar: kuning -> hijau
+	delete(p.testing, id)  // hasil sudah keluar: kuning -> hijau
+	delete(p.progress, id) // progres selesai
 	p.mu.Unlock()
 }
 

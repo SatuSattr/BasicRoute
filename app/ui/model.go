@@ -609,14 +609,14 @@ func (m Model) sysKeyNames() []string {
 
 // refreshApiUsage menarik snapshot usage dari memori (bukan file).
 func (m *Model) refreshApiUsage() {
-	if m.deps.Store == nil || m.deps.Store.Usage == nil {
+	if m.deps.Store == nil || m.deps.Store.Data == nil {
 		m.apiUsage = map[string]uint64{}
 		m.apiLast = map[string]int64{}
 		m.apiUsageAt = time.Now()
 		return
 	}
-	m.apiUsage = m.deps.Store.Usage.Snapshot()
-	m.apiLast = m.deps.Store.Usage.SnapshotLast()
+	m.apiUsage = m.deps.Store.Data.UsageSnapshot()
+	m.apiLast = m.deps.Store.Data.UsageSnapshotLast()
 	m.apiUsageAt = time.Now()
 }
 

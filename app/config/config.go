@@ -18,13 +18,14 @@ type Config struct {
 }
 
 type System struct {
-	Host         string             `json:"host"`
-	Port         FlexInt            `json:"port"`
-	RequireAuth  FlexBool           `json:"requireAuth"`
-	Keys         map[string]*SysKey `json:"keys"`
-	Limits       Limits             `json:"limits"`
-	UsageFile    string             `json:"usageFile,omitempty"`
-	ProxyTestURL string             `json:"proxyTestUrl,omitempty"`
+	Host                 string             `json:"host"`
+	Port                 FlexInt            `json:"port"`
+	RequireAuth          FlexBool           `json:"requireAuth"`
+	Keys                 map[string]*SysKey `json:"keys"`
+	Limits               Limits             `json:"limits"`
+	DataFile             string             `json:"dataFile,omitempty"`
+	DataSaveIntervalSecs FlexInt            `json:"dataSaveIntervalSecs,omitempty"`
+	ProxyTestURL         string             `json:"proxyTestUrl,omitempty"`
 }
 
 type SysKey struct {
@@ -42,7 +43,7 @@ type Provider struct {
 	Type        string              `json:"type"`   // v1: hanya "openai"
 	Interface   string              `json:"interface"`
 	BaseURL     string              `json:"baseUrl"`
-	Proxy       string              `json:"proxy,omitempty"` // nama pool di ProxyPools, "" = direct
+	Proxy       string              `json:"proxy,omitempty"`       // nama pool di ProxyPools, "" = direct
 	KeyStrategy string              `json:"keyStrategy,omitempty"` // ""/ordered = failover urutan Order, "round" = rotasi start per-request
 	Enabled     FlexBool            `json:"enabled"`
 	TimeoutSecs FlexInt             `json:"timeoutSecs"`
@@ -440,10 +441,16 @@ func validateAndNormalize(cfg *Config) error {
 	if cfg.System.RequireAuth && enabledSysKeys == 0 {
 		return fmt.Errorf("system.keys: requireAuth=true needs >=1 enabled system key")
 	}
-	if strings.TrimSpace(cfg.System.UsageFile) == "" {
-		cfg.System.UsageFile = "/app/data/usage.json"
+	if strings.TrimSpace(cfg.System.DataFile) == "" {
+		cfg.System.DataFile = "/app/data/data.json"
 	} else {
-		cfg.System.UsageFile = strings.TrimSpace(cfg.System.UsageFile)
+		cfg.System.DataFile = strings.TrimSpace(cfg.System.DataFile)
+	}
+	if cfg.System.DataSaveIntervalSecs < 0 {
+		return fmt.Errorf("system.dataSaveIntervalSecs: must be > 0, got %d", int(cfg.System.DataSaveIntervalSecs))
+	}
+	if cfg.System.DataSaveIntervalSecs == 0 {
+		cfg.System.DataSaveIntervalSecs = FlexInt(180)
 	}
 	if strings.TrimSpace(cfg.System.ProxyTestURL) == "" {
 		cfg.System.ProxyTestURL = "https://www.gstatic.com/generate_204"

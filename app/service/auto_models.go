@@ -169,7 +169,7 @@ func (st *Store) refreshOneAutoModel(log *slog.Logger, gen uint64, slug string) 
 	}
 	id := ProvProviderID(slug)
 	if st.ProvHealth != nil {
-		st.ProvHealth.SetTesting(id)
+		st.ProvHealth.SetProgress(id, ProvPhaseFetching, 0, 0)
 	}
 	if log != nil {
 		log.Info("auto models fetching", "provider", slug)

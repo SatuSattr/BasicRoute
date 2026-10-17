@@ -219,8 +219,8 @@ func printSystem(out io.Writer, d Deps) {
 	tw2 := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw2, "    NAME\tSTATUS\tKEY\tTOTAL TOKENS")
 	usage := map[string]uint64{}
-	if d.Store != nil && d.Store.Usage != nil {
-		usage = d.Store.Usage.Snapshot()
+	if d.Store != nil && d.Store.Data != nil {
+		usage = d.Store.Data.UsageSnapshot()
 	}
 	for _, n := range names {
 		k := sys.Keys[n]
@@ -264,8 +264,8 @@ func printSysKeyDetail(out io.Writer, d Deps, arg string) {
 	fmt.Fprintf(tw, "  status\t%s\n", onOff(bool(k.Enabled)))
 	fmt.Fprintf(tw, "  key\t%s\n", maskKey(k.Key))
 	var toks uint64
-	if d.Store != nil && d.Store.Usage != nil {
-		toks = d.Store.Usage.Total(service.HashSysKey(k.Key))
+	if d.Store != nil && d.Store.Data != nil {
+		toks = d.Store.Data.UsageTotal(service.HashSysKey(k.Key))
 	}
 	fmt.Fprintf(tw, "  totalTokens\t%s\n", FormatTokens(toks))
 	_ = tw.Flush()
@@ -743,10 +743,13 @@ func autoModelsLabel(d Deps, snap *config.Snapshot, slug string) string {
 	}
 	if d.Store != nil && d.Store.ProvHealth != nil {
 		pid := service.ProvProviderID(slug)
-		switch {
-		case d.Store.ProvHealth.IsTesting(pid):
-			return "auto (fetching…)"
-		case d.Store.ProvHealth.IsError(pid):
+		if phase, done, total, ok := d.Store.ProvHealth.Progress(pid); ok {
+			if phase == service.ProvPhaseIdentifying {
+				return fmt.Sprintf("identifying (%d/%d)", done, total)
+			}
+			return "fetching"
+		}
+		if d.Store.ProvHealth.IsError(pid) {
 			return "auto (error)"
 		}
 	}

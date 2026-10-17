@@ -1,6 +1,7 @@
 # secrets & local config (jangan di-commit)
 .env
 config.jsonc
+data.json
 
 # build output
 basicroute

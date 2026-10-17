@@ -60,11 +60,18 @@ func main() {
 	}
 
 	st := service.NewStore(snap)
-	st.Usage = service.NewUsageTracker(snap.Raw.System.UsageFile)
-	st.Usage.Load()
-	usageStop := make(chan struct{})
-	go st.Usage.AutoFlush(service.FlushInterval, usageStop)
-	defer close(usageStop)
+	data := service.NewDataStore(snap.Raw.System.DataFile, time.Duration(snap.Raw.System.DataSaveIntervalSecs)*time.Second)
+	if err := data.Load(); err != nil {
+		log.Warn("data load failed, starting empty", "path", snap.Raw.System.DataFile, "err", err.Error())
+	}
+	_ = data.Flush()
+	data.Start()
+	st.Data = data
+	defer func() {
+		if st.Data != nil {
+			st.Data.Stop()
+		}
+	}()
 	pool := service.NewPool()
 	srv := server.New(st, pool, log, int(snap.Raw.System.Limits.MaxBodyMB))
 	handler := srv.Handler()
@@ -91,12 +98,21 @@ func main() {
 		st.SetDraining(true)
 		log.Info("reload draining", "inFlight", st.InFlight())
 		st.WaitIdle(drainTimeout)
-		// Flush usage sebelum ganti snapshot; bila path berubah, pindah tracker.
-		if st.Usage != nil {
-			_ = st.Usage.Flush()
-			if staged.Raw.System.UsageFile != "" && staged.Raw.System.UsageFile != st.Usage.Path() {
-				st.Usage = service.NewUsageTracker(staged.Raw.System.UsageFile)
-				st.Usage.Load()
+		// Flush data sebelum ganti snapshot; bila path berubah, pindah store.
+		if st.Data != nil {
+			_ = st.Data.Flush()
+			newPath := staged.Raw.System.DataFile
+			newIv := time.Duration(staged.Raw.System.DataSaveIntervalSecs) * time.Second
+			if newPath != "" && newPath != st.Data.Path() {
+				nd := service.NewDataStore(newPath, newIv)
+				if err := nd.Load(); err != nil {
+					log.Warn("data load failed on reload, starting empty", "path", newPath, "err", err.Error())
+				}
+				nd.Start()
+				st.Data.Stop()
+				st.Data = nd
+			} else {
+				st.Data.SetInterval(newIv)
 			}
 		}
 		st.Swap(staged)
@@ -112,10 +128,8 @@ func main() {
 			log.Info("shutdown requested, draining", "reason", reason, "inFlight", st.InFlight())
 			st.SetDraining(true)
 			st.WaitIdle(drainTimeout)
-			if st.Usage != nil {
-				if err := st.Usage.Flush(); err != nil {
-					log.Warn("usage flush failed", "err", err.Error())
-				}
+			if st.Data != nil {
+				st.Data.Stop()
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer cancel()

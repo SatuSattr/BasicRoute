@@ -124,7 +124,7 @@ func (s *Server) maybeRetestProxies(snap *config.Snapshot, prov *config.Provider
 	timeout := service.TestTimeout(15)
 	sampleKey := sampleProvKey(prov)
 	for _, t := range flagged {
-		s.retestProxy(t, prov.BaseURL, sampleKey, testURL, timeout)
+		s.retestProxy(t, prov, sampleKey, testURL, timeout)
 	}
 }
 
@@ -145,7 +145,7 @@ func sampleProvKey(prov *config.Provider) string {
 // retestProxy menjalankan satu silent re-test bila guard mengizinkan:
 // pertama probe provider-spesifik (TestProvKey ke baseURL provider lewat
 // pool), gagal -> fallback TestProxy generik. Salah satu sukses = pulih.
-func (s *Server) retestProxy(t service.ProxyTarget, baseURL, sampleKey, testURL string, timeout time.Duration) {
+func (s *Server) retestProxy(t service.ProxyTarget, prov *config.Provider, sampleKey, testURL string, timeout time.Duration) {
 	name := t.Name
 	s.retestMu.Lock()
 	if s.proxyRetestRun[name] || time.Since(s.proxyRetestLast[name]) < proxyRetestInterval {
@@ -166,6 +166,10 @@ func (s *Server) retestProxy(t service.ProxyTarget, baseURL, sampleKey, testURL 
 		// Probe utama provider-spesifik (pool -> upstream asli). Key
 		// invalid (401/403) ikut gagal di sini, jadi kegagalannya TIDAK
 		// dipakai menahan flag: fallback generik yang memutuskan.
+		baseURL := ""
+		if prov != nil {
+			baseURL = prov.BaseURL
+		}
 		if sampleKey != "" {
 			if err := service.TestProvKey(baseURL, typ, raw, sampleKey, timeout); err == nil {
 				s.st.ProxyHealth.SetOK(name)

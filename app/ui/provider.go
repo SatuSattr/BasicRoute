@@ -434,13 +434,20 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 				n++
 			}
 		}
-		switch {
-		case m.deps.Store.ProvHealth != nil && m.deps.Store.ProvHealth.IsTesting(service.ProvProviderID(slug)):
-			modelsInfo = "auto (fetching…)"
-		case m.deps.Store.ProvHealth != nil && m.deps.Store.ProvHealth.IsError(service.ProvProviderID(slug)):
-			modelsInfo = "auto (error)"
-		default:
-			modelsInfo = fmt.Sprintf("auto (%d fetched)", n)
+		modelsInfo = fmt.Sprintf("auto (%d fetched)", n)
+		if ph := m.deps.Store.ProvHealth; ph != nil {
+			pid := service.ProvProviderID(slug)
+			if phase, done, total, ok := ph.Progress(pid); ok {
+				// Dua fase: fetching (unduh daftar) lalu identifying (probe
+				// endpoint per model free, dengan progres done/total).
+				if phase == service.ProvPhaseIdentifying {
+					modelsInfo = fmt.Sprintf("identifying (%d/%d)", done, total)
+				} else {
+					modelsInfo = "fetching"
+				}
+			} else if ph.IsError(pid) {
+				modelsInfo = "auto (error)"
+			}
 		}
 	}
 	info := [][2]string{
@@ -542,14 +549,29 @@ func (m Model) providerDetail(f frame) (lines []dline, keyLines []int, modelLine
 
 	out = append(out, dline{[]dseg{{"", styleBody}}})
 	out = append(out, dline{[]dseg{{strings.Repeat("─", inner), styleSep}}})
-	out = append(out, dline{[]dseg{{fmt.Sprintf("Models (%d)", len(mslugs)), styleSecHead}}})
+	modelsHead := fmt.Sprintf("Models (%d)", len(mslugs))
+	if p.IsModelsAuto() {
+		if ph := m.deps.Store.ProvHealth; ph != nil {
+			if phase, _, total, ok := ph.Progress(service.ProvProviderID(slug)); ok && phase == service.ProvPhaseIdentifying && total > 0 {
+				modelsHead = fmt.Sprintf("Models (%d/%d)", len(mslugs), total)
+			}
+		}
+	}
+	out = append(out, dline{[]dseg{{modelsHead, styleSecHead}}})
 	if len(mslugs) == 0 {
 		if p.IsModelsAuto() {
-			if m.deps.Store.ProvHealth != nil && m.deps.Store.ProvHealth.IsTesting(service.ProvProviderID(slug)) {
-				out = append(out, dline{[]dseg{{"(fetching models…)", styleDetLbl}}})
-			} else if m.deps.Store.ProvHealth != nil && m.deps.Store.ProvHealth.IsError(service.ProvProviderID(slug)) {
+			ph := m.deps.Store.ProvHealth
+			pid := service.ProvProviderID(slug)
+			switch {
+			case ph != nil && ph.IsTesting(pid):
+				if phase, done, total, ok := ph.Progress(pid); ok && phase == service.ProvPhaseIdentifying {
+					out = append(out, dline{[]dseg{{fmt.Sprintf("(identifying models… %d/%d)", done, total), styleDetLbl}}})
+				} else {
+					out = append(out, dline{[]dseg{{"(fetching models…)", styleDetLbl}}})
+				}
+			case ph != nil && ph.IsError(pid):
 				out = append(out, dline{[]dseg{{"(fetch failed — see error below)", styleDetLbl}}})
-			} else {
+			default:
 				out = append(out, dline{[]dseg{{"(no models fetched yet)", styleDetLbl}}})
 			}
 		} else {
