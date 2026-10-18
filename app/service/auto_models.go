@@ -20,12 +20,15 @@ type AutoModel struct {
 }
 
 type modelsListResp struct {
-	Data []modelsListItem `json:"data"`
+	Data   []modelsListItem `json:"data"`
+	Models []modelsListItem `json:"models"` // Google: GET {base}/models
 }
 
 type modelsListItem struct {
-	ID      string          `json:"id"`
-	Created json.RawMessage `json:"created"`
+	ID                         string          `json:"id"`
+	Name                       string          `json:"name"`
+	Created                    json.RawMessage `json:"created"`
+	SupportedGenerationMethods []string        `json:"supportedGenerationMethods"`
 }
 
 func parseCreated(raw json.RawMessage) int64 {
@@ -61,7 +64,7 @@ func parseCreated(raw json.RawMessage) int64 {
 }
 
 // fetchAutoModelsViaTarget melakukan satu GET /models lewat satu proxy target.
-func fetchAutoModelsViaTarget(baseURL, proxyType, proxyURL, key string, timeout time.Duration) ([]AutoModel, int, error) {
+func fetchAutoModelsViaTarget(baseURL, provType, proxyType, proxyURL, key string, timeout time.Duration) ([]AutoModel, int, error) {
 	client, err := testClient(proxyType, proxyURL, timeout)
 	if err != nil {
 		return nil, 0, err
@@ -70,7 +73,7 @@ func fetchAutoModelsViaTarget(baseURL, proxyType, proxyURL, key string, timeout 
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
+	SetAuth(req.Header, provType, key)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -84,10 +87,20 @@ func fetchAutoModelsViaTarget(baseURL, proxyType, proxyURL, key string, timeout 
 	if err := json.Unmarshal(body, &list); err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("auto models fetch: invalid models response: %w", err)
 	}
+	items := list.Data
+	if len(items) == 0 {
+		items = list.Models // Google: name/models[] + supportedGenerationMethods
+	}
 	seen := map[string]bool{}
-	out := make([]AutoModel, 0, len(list.Data))
-	for _, it := range list.Data {
+	out := make([]AutoModel, 0, len(items))
+	for _, it := range items {
+		if !autoModelSupported(it) {
+			continue
+		}
 		id := strings.TrimSpace(it.ID)
+		if id == "" {
+			id = strings.TrimSpace(it.Name)
+		}
 		if i := strings.LastIndex(id, "/"); i >= 0 {
 			id = strings.TrimSpace(id[i+1:])
 		}
@@ -100,10 +113,27 @@ func fetchAutoModelsViaTarget(baseURL, proxyType, proxyURL, key string, timeout 
 	return out, resp.StatusCode, nil
 }
 
+// autoModelSupported menyaring model Google yang tidak bisa dipakai lewat
+// Interactions (mis. embedding/imagen). Provider [OI] tidak mengirim daftar
+// metode, jadi semua model diteruskan.
+func autoModelSupported(it modelsListItem) bool {
+	if len(it.SupportedGenerationMethods) == 0 {
+		return true
+	}
+	for _, m := range it.SupportedGenerationMethods {
+		switch strings.ToLower(strings.TrimSpace(m)) {
+		case "generatecontent", "interactions", "generate_content":
+			return true
+		}
+	}
+	return false
+}
+
 // autoFetchWithFailover mencoba semua key (urut order) x semua proxy target
-// (urut order, full-failover): key pertama dulu; auth-invalid (401/403) lanjut
-// ke key berikutnya; proxy-side fault (transport/407) lanjut ke target
-// berikutnya dengan key yang sama; sukses pertama langsung dipakai.
+// (urut order, full-failover): key pertama dulu; auth-invalid (401/403, atau
+// 400 API_KEY_INVALID Google) lanjut ke key berikutnya; proxy-side fault
+// (transport/407) lanjut ke target berikutnya dengan key yang sama; sukses
+// pertama langsung dipakai.
 // Mengembalikan juga usedKey (key yang berhasil, "" bila gagal) dan badKeys
 // (keyName -> pesan auth-invalid) agar pemanggil bisa flag key yang error,
 // konsisten dengan test model manual (applyModelTestResult).
@@ -115,7 +145,7 @@ func autoFetchWithFailover(snap *config.Snapshot, prov *config.Provider, slug st
 			continue
 		}
 		for _, tgt := range targets {
-			m, status, ferr := fetchAutoModelsViaTarget(strings.TrimSpace(prov.BaseURL), tgt.Type, tgt.URL, ke.Key, timeout)
+			m, status, ferr := fetchAutoModelsViaTarget(strings.TrimSpace(prov.BaseURL), prov.Type, tgt.Type, tgt.URL, ke.Key, timeout)
 			if ferr == nil {
 				return m, ke.Name, badKeys, nil
 			}

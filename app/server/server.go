@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"basicroute/app/config"
+	"basicroute/app/google"
 	"basicroute/app/model"
 	"basicroute/app/service"
 )
@@ -338,8 +339,24 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		lg.Info("req<", "status", 503, "provider", ref.ProviderSlug)
 		return
 	}
-	body["model"] = ref.ModelSlug
-	upBody, err := json.Marshal(body)
+	inboundIface := config.InterfaceChatCompletions
+	if strings.HasSuffix(r.URL.Path, "/responses") {
+		inboundIface = config.InterfaceResponsesAPI
+	}
+
+	var upBody []byte
+	if ref.Provider.IsGoogle() {
+		translated, terr := google.TranslateRequest(body, inboundIface, ref.ModelSlug)
+		if terr != nil {
+			writeErr(w, http.StatusBadRequest, terr.Error(), "invalid_request_error", "invalid_request")
+			lg.Info("req<", "status", 400)
+			return
+		}
+		upBody, err = json.Marshal(translated)
+	} else {
+		body["model"] = ref.ModelSlug
+		upBody, err = json.Marshal(body)
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "cannot encode upstream body", "server_error", "")
 		lg.Info("req<", "status", 500)
@@ -347,6 +364,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upURL := service.TargetURL(ref.Provider.BaseURL, ref.Provider.Interface)
+	if ref.Provider.IsGoogle() && stream {
+		sep := "?"
+		if strings.Contains(upURL, "?") {
+			sep = "&"
+		}
+		upURL += sep + "alt=sse"
+	}
 
 	// Kandidat proxy: direct / pool / auto / round (urutan + prioritas sehat).
 	targets, err := s.proxyCandidates(snap, ref.ProviderSlug, ref.Provider)
@@ -457,6 +481,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				run := &upstreamRun{
 					s: s, w: w, r: r, lg: lg, ref: ref, client: client, tgt: tgt,
 					upURL: upURL, upBody: upBody, timeout: to, stream: stream,
+					inboundIface: inboundIface, publicModel: modelID,
 					singleTry: singleTry, ring: []*config.KeyEntry{ke}, healthy: hasHealthy,
 					healthModelID: healthModelID, callerHash: callerHash, callerName: callerName,
 				}

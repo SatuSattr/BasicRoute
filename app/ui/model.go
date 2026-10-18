@@ -360,9 +360,9 @@ type modelTestResultMsg struct {
 
 // provTestParams merangkum parameter test untuk satu provider.
 type provTestParams struct {
-	slug, base, iface, ptype, purl string
-	timeout                        time.Duration
-	ok                             bool
+	slug, base, provType, iface, ptype, purl string
+	timeout                                  time.Duration
+	ok                                       bool
 }
 
 // provTestParamsFor membaca parameter test provider dari snapshot live.
@@ -380,13 +380,14 @@ func (m Model) provTestParamsFor(slug string) (provTestParams, error) {
 		return provTestParams{}, err
 	}
 	return provTestParams{
-		slug:    slug,
-		base:    strings.TrimSpace(p.BaseURL),
-		iface:   strings.TrimSpace(p.Interface),
-		ptype:   ptype,
-		purl:    purl,
-		timeout: service.TestTimeout(int(p.TimeoutSecs)),
-		ok:      true,
+		slug:     slug,
+		base:     strings.TrimSpace(p.BaseURL),
+		provType: p.Type,
+		iface:    strings.TrimSpace(p.Interface),
+		ptype:    ptype,
+		purl:     purl,
+		timeout:  service.TestTimeout(int(p.TimeoutSecs)),
+		ok:       true,
 	}, nil
 }
 
@@ -413,7 +414,7 @@ func (m Model) testProvKeyCmd(slug, keyName string) tea.Cmd {
 		return keyTestResultMsg{res: keyTestResult{
 			slug:    slug,
 			keyName: keyName,
-			err:     service.TestProvKey(prm.base, prm.ptype, prm.purl, keyVal, prm.timeout),
+			err:     service.TestProvKey(prm.base, prm.provType, prm.ptype, prm.purl, keyVal, prm.timeout),
 		}}
 	}
 }
@@ -449,7 +450,7 @@ func (m Model) testProvModelCmd(slug, modelSlug string) tea.Cmd {
 	return func() tea.Msg {
 		res := modelTestResult{slug: slug, modelSlug: modelSlug, badKeys: map[string]string{}}
 		for _, k := range keys {
-			err := service.TestProvModel(prm.base, prm.iface, prm.ptype, prm.purl, modelSlug, k.val, prm.timeout)
+			err := service.TestProvModel(prm.base, prm.provType, prm.iface, prm.ptype, prm.purl, modelSlug, k.val, prm.timeout)
 			if err == nil {
 				res.usedKey = k.name
 				return modelTestResultMsg{res: res}

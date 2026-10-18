@@ -45,7 +45,7 @@ func ResolveProxy(snap *config.Snapshot, prov *config.Provider) (proxyType, prox
 }
 
 // ModelsURL membangun URL endpoint daftar model dari baseURL provider
-// Models (OpenAI-compatible: GET {base}/models).
+// (GET {base}/models; dipakai provider [OI] maupun Google).
 func ModelsURL(baseURL string) string {
 	return strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/models"
 }
@@ -83,7 +83,7 @@ func errBody(what string, status int, body []byte) error {
 
 // TestProvKey menguji satu provider key via GET {baseURL}/models.
 // Return nil bila key valid (HTTP 2xx).
-func TestProvKey(baseURL, proxyType, proxyURL, key string, timeout time.Duration) error {
+func TestProvKey(baseURL, provType, proxyType, proxyURL, key string, timeout time.Duration) error {
 	client, err := testClient(proxyType, proxyURL, timeout)
 	if err != nil {
 		return err
@@ -92,7 +92,7 @@ func TestProvKey(baseURL, proxyType, proxyURL, key string, timeout time.Duration
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
+	SetAuth(req.Header, provType, key)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -107,15 +107,22 @@ func TestProvKey(baseURL, proxyType, proxyURL, key string, timeout time.Duration
 
 // TestProvModel menguji satu model dengan chat minimal memakai key tertentu.
 // Isi jawaban AI tidak diparse: HTTP 2xx apa pun = berhasil.
-func TestProvModel(baseURL, iface, proxyType, proxyURL, modelSlug, key string, timeout time.Duration) error {
+func TestProvModel(baseURL, provType, iface, proxyType, proxyURL, modelSlug, key string, timeout time.Duration) error {
 	client, err := testClient(proxyType, proxyURL, timeout)
 	if err != nil {
 		return err
 	}
 	prompt := "is 1+1=2?, answer only yes or no"
 	var payload map[string]any
-	switch strings.TrimSpace(iface) {
-	case "responses-api":
+	switch {
+	case strings.EqualFold(strings.TrimSpace(provType), config.ProviderTypeGoogle):
+		payload = map[string]any{
+			"model":             modelSlug,
+			"input":             prompt,
+			"store":             false,
+			"generation_config": map[string]any{"max_output_tokens": 8},
+		}
+	case strings.TrimSpace(iface) == "responses-api":
 		payload = map[string]any{
 			"model":             modelSlug,
 			"input":             prompt,
@@ -138,7 +145,7 @@ func TestProvModel(baseURL, iface, proxyType, proxyURL, modelSlug, key string, t
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
+	SetAuth(req.Header, provType, key)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -152,12 +159,14 @@ func TestProvModel(baseURL, iface, proxyType, proxyURL, modelSlug, key string, t
 }
 
 // IsAuthErr melaporkan apakah error test menandakan key tidak valid
-// (401/403). Key semacam itu dilewati ke key berikutnya saat test model.
+// (401/403, atau 400 API_KEY_INVALID khas Google). Key semacam itu dilewati
+// ke key berikutnya saat test model.
 func IsAuthErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "HTTP 403") ||
-		strings.Contains(msg, "invalid_api_key")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "http 401") || strings.Contains(msg, "http 403") ||
+		strings.Contains(msg, "invalid_api_key") || strings.Contains(msg, "api_key_invalid") ||
+		strings.Contains(msg, "api key not valid") || strings.Contains(msg, "invalid api key")
 }

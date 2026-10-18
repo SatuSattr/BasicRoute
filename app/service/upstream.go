@@ -395,9 +395,32 @@ func TargetURL(base, iface string) string {
 			return b
 		}
 		return b + "/responses"
+	case "interactions":
+		if strings.HasSuffix(b, "/interactions") {
+			return b
+		}
+		return b + "/interactions"
 	default:
 		return b
 	}
+}
+
+// GoogleAPIRevision adalah versi Interactions API yang dikirim pada header
+// Api-Revision (lihat contoh REST resmi).
+const GoogleAPIRevision = "2026-05-20"
+
+// SetAuth memasang header autentikasi upstream sesuai tipe provider.
+// Google memakai x-goog-api-key; provider [OI] memakai Authorization Bearer.
+func SetAuth(h http.Header, provType, key string) {
+	if h == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(provType), config.ProviderTypeGoogle) {
+		h.Set("x-goog-api-key", key)
+		h.Set("Api-Revision", GoogleAPIRevision)
+		return
+	}
+	h.Set("Authorization", "Bearer "+key)
 }
 
 var skipHeaders = map[string]struct{}{
@@ -411,6 +434,7 @@ var skipHeaders = map[string]struct{}{
 	"transfer-encoding":   {},
 	"upgrade":             {},
 	"authorization":       {},
+	"x-goog-api-key":      {},
 	"host":                {},
 	"content-length":      {},
 }

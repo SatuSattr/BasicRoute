@@ -37,10 +37,26 @@ type Limits struct {
 	MaxBodyMB FlexFloat `json:"maxBodyMB"`
 }
 
+// Tipe provider yang didukung.
+const (
+	ProviderTypeOpenAI = "openai" // [OI]-compatible upstream (transparent proxy)
+	ProviderTypeGoogle = "google" // Google Gemini Interactions API (translated)
+)
+
+// Interface upstream yang didukung.
+const (
+	InterfaceChatCompletions = "chat-completions"
+	InterfaceResponsesAPI    = "responses-api"
+	InterfaceInteractions    = "interactions"
+)
+
+// DefaultGoogleBaseURL dipakai bila provider google tidak menentukan baseUrl.
+const DefaultGoogleBaseURL = "https://generativelanguage.googleapis.com/v1beta"
+
 type Provider struct {
 	Name        string              `json:"name"`
 	Prefix      string              `json:"prefix"` // namespace publik, unik, ^[a-z0-9-]+$
-	Type        string              `json:"type"`   // v1: hanya "openai"
+	Type        string              `json:"type"`   // "openai" atau "google"
 	Interface   string              `json:"interface"`
 	BaseURL     string              `json:"baseUrl"`
 	Proxy       string              `json:"proxy,omitempty"`       // nama pool di ProxyPools, "" = direct
@@ -58,6 +74,11 @@ type Provider struct {
 // IsModelsAuto melaporkan apakah provider memakai mode fetch otomatis.
 func (p *Provider) IsModelsAuto() bool {
 	return p != nil && p.ModelsAuto
+}
+
+// IsGoogle melaporkan apakah provider memakai Google Interactions API.
+func (p *Provider) IsGoogle() bool {
+	return p != nil && p.Type == ProviderTypeGoogle
 }
 
 // rawProvider adalah bayangan Provider untuk parsing polimorfik field models.
@@ -175,6 +196,7 @@ type ProvKey struct {
 type Model struct {
 	Name    string   `json:"name"`
 	Enabled FlexBool `json:"enabled"`
+	Input   []string `json:"input,omitempty"` // modalitas yang diterima model
 	Limit   Limit    `json:"limit"`
 	Created FlexInt  `json:"created,omitempty"`
 }
@@ -182,6 +204,55 @@ type Model struct {
 type Limit struct {
 	Context FlexInt `json:"context"`
 	Output  FlexInt `json:"output"`
+}
+
+// Jenis input (modalitas) yang boleh dideklarasikan pada Model.Input.
+const (
+	InputText  = "text"
+	InputImage = "image"
+	InputVideo = "video"
+	InputAudio = "audio"
+	InputPDF   = "pdf"
+)
+
+// allowedModelInputs adalah himpunan modalitas yang sah untuk Model.Input.
+var allowedModelInputs = map[string]bool{
+	InputText:  true,
+	InputImage: true,
+	InputVideo: true,
+	InputAudio: true,
+	InputPDF:   true,
+}
+
+// allowedModelInputsList adalah daftar modalitas untuk pesan error.
+const allowedModelInputsList = "text, image, video, audio, pdf"
+
+// normalizeInput merapikan Model.Input: trim + lowercase, buang duplikat, dan
+// tolak nilai tak dikenal. Daftar kosong/absen -> tetap kosong (tak
+// dideklarasikan). Ini murni metadata: BasicRoute tetap meneruskan body
+// request apa adanya, apa pun modalitasnya.
+func (m *Model) normalizeInput() error {
+	if m == nil || len(m.Input) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(m.Input))
+	out := make([]string, 0, len(m.Input))
+	for _, raw := range m.Input {
+		v := strings.ToLower(strings.TrimSpace(raw))
+		if v == "" {
+			return fmt.Errorf("input: empty value (allowed: %s)", allowedModelInputsList)
+		}
+		if !allowedModelInputs[v] {
+			return fmt.Errorf("input: unknown type %q (allowed: %s)", raw, allowedModelInputsList)
+		}
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	m.Input = out
+	return nil
 }
 
 // Tipe proxy pool yang didukung.
@@ -531,11 +602,25 @@ func validateAndNormalize(cfg *Config) error {
 		}
 		seenPrefix[prov.Prefix] = slug
 
-		if prov.Type != "openai" {
-			return fmt.Errorf("%s.type: must be \"openai\", got %q", base, prov.Type)
-		}
-		if prov.Interface != "chat-completions" && prov.Interface != "responses-api" {
-			return fmt.Errorf("%s.interface: must be chat-completions|responses-api, got %q", base, prov.Interface)
+		prov.Type = strings.ToLower(strings.TrimSpace(prov.Type))
+		prov.Interface = strings.ToLower(strings.TrimSpace(prov.Interface))
+		switch prov.Type {
+		case ProviderTypeOpenAI:
+			if prov.Interface != InterfaceChatCompletions && prov.Interface != InterfaceResponsesAPI {
+				return fmt.Errorf("%s.interface: must be chat-completions|responses-api, got %q", base, prov.Interface)
+			}
+		case ProviderTypeGoogle:
+			if prov.Interface == "" {
+				prov.Interface = InterfaceInteractions
+			}
+			if prov.Interface != InterfaceInteractions {
+				return fmt.Errorf("%s.interface: must be interactions for type google, got %q", base, prov.Interface)
+			}
+			if strings.TrimSpace(prov.BaseURL) == "" {
+				prov.BaseURL = DefaultGoogleBaseURL
+			}
+		default:
+			return fmt.Errorf("%s.type: must be \"openai\" or \"google\", got %q", base, prov.Type)
 		}
 
 		norm := strings.TrimRight(strings.TrimSpace(prov.BaseURL), "/")
@@ -627,6 +712,9 @@ func validateAndNormalize(cfg *Config) error {
 			}
 			if m.Created < 0 {
 				return fmt.Errorf("%s.created: must be >= 0 (unix timestamp, 0 = omitted), got %d", mb, int(m.Created))
+			}
+			if err := m.normalizeInput(); err != nil {
+				return fmt.Errorf("%s.%s", mb, err)
 			}
 			if m.Enabled {
 				enabledModels++

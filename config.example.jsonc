@@ -3,7 +3,7 @@
     "host": "<ENV:HOST|0.0.0.0>",
     "port": "<ENV:PORT|21172>",
     "requireAuth": true,
-    "dataFile": "/app/data/data.json",
+    "dataFile": "data.json",
     "dataSaveIntervalSecs": 180,
     "proxyTestUrl": "https://www.gstatic.com/generate_204",
     "keys": {
@@ -17,8 +17,8 @@
     },
   },
   "providers": {
-    "openai-direct": {
-      "name": "OpenAI Direct",
+    "openai": {
+      "name": "OpenAI",
       "prefix": "openai",
       "type": "openai",
       "interface": "chat-completions",
@@ -42,12 +42,32 @@
           "name": "GPT-4o Mini",
           "enabled": true,
           "created": 1686935002,
+          "input": ["text", "image"],
           "limit": { "context": 128000, "output": 16384 },
         },
-        "gpt-4o": {
-          "name": "GPT-4o",
+      },
+    },
+    "google": {
+      "name": "Google",
+      "prefix": "gemini",
+      "type": "google",
+      "interface": "interactions",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "enabled": true,
+      "timeoutSecs": 60,
+      "keys": {
+        "key-1": {
+          "key": "<ENV:GEMINI_KEY_1|AIza-example-1>",
+          "order": 1,
           "enabled": true,
-          "limit": { "context": 128000, "output": 4096 },
+        },
+      },
+      "models": {
+        "gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash",
+          "enabled": true,
+          "input": ["text", "image", "audio", "video", "pdf"],
+          "limit": { "context": 1000000, "output": 65536 },
         },
       },
     },
@@ -64,12 +84,6 @@
       "url": "https://your-relay.vercel.app",
       "order": 2,
       "enabled": false,
-    },
-    "pool-us": {
-      "type": "http",
-      "url": "http://customer123:your_password@us.proxy.example.com:8080",
-      "order": 3,
-      "enabled": true,
     },
   },
 }

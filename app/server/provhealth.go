@@ -94,7 +94,7 @@ func (s *Server) maybeRetestKeys(snap *config.Snapshot, slug string, prov *confi
 			return
 		}
 		for _, k := range flagged {
-			if rerr := service.TestProvKey(base, ptype, purl, k.val, timeout); rerr != nil {
+			if rerr := service.TestProvKey(base, prov.Type, ptype, purl, k.val, timeout); rerr != nil {
 				s.log.Warn("silent key retest still failing", "provider", slug, "key", k.name, "err", rerr.Error())
 				continue
 			}

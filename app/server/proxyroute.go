@@ -166,12 +166,13 @@ func (s *Server) retestProxy(t service.ProxyTarget, prov *config.Provider, sampl
 		// Probe utama provider-spesifik (pool -> upstream asli). Key
 		// invalid (401/403) ikut gagal di sini, jadi kegagalannya TIDAK
 		// dipakai menahan flag: fallback generik yang memutuskan.
-		baseURL := ""
+		baseURL, provType := "", ""
 		if prov != nil {
 			baseURL = prov.BaseURL
+			provType = prov.Type
 		}
 		if sampleKey != "" {
-			if err := service.TestProvKey(baseURL, typ, raw, sampleKey, timeout); err == nil {
+			if err := service.TestProvKey(baseURL, provType, typ, raw, sampleKey, timeout); err == nil {
 				s.st.ProxyHealth.SetOK(name)
 				s.st.NoteProxyResult(name, true)
 				s.log.Info("silent proxy retest recovered", "proxy", name, "via", "provider")

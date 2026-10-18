@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"basicroute/app/config"
+	"basicroute/app/google"
 	"basicroute/app/service"
 )
 
@@ -50,6 +51,8 @@ type upstreamRun struct {
 	upBody          []byte
 	timeout         time.Duration
 	stream          bool
+	inboundIface    string
+	publicModel     string
 	singleTry       bool
 	ring            []*config.KeyEntry
 	healthy         bool
@@ -178,7 +181,7 @@ func (u *upstreamRun) attempt(ke *config.KeyEntry, keyID string) attemptOutcome 
 	}
 	service.CopyHeaders(upReq.Header, u.r.Header)
 	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("Authorization", "Bearer "+ke.Key)
+	service.SetAuth(upReq.Header, u.ref.Provider.Type, ke.Key)
 
 	u.lg.Info("up>", "target", u.upURL, "provider", u.ref.ProviderSlug, "proxy", u.proxyLabel(), "key", ke.Name, "masked", MaskKey(ke.Key))
 	t0 := time.Now()
@@ -214,6 +217,26 @@ func (u *upstreamRun) attempt(ke *config.KeyEntry, keyID string) attemptOutcome 
 		u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, ttft.Milliseconds(), true)
 		u.lg.Warn("up<", "provider", u.ref.ProviderSlug, "proxy", u.tgt.Name, "status", resp.StatusCode)
 		return attemptOutcome{kind: attemptProxyFail, err: fmt.Errorf("upstream HTTP %d no-retry", resp.StatusCode)}
+	}
+
+	// Google melaporkan API key tidak valid sebagai 400 INVALID_ARGUMENT:
+	// perlakukan seperti 401 agar failover antar-key tetap jalan.
+	if !u.singleTry && u.ref.Provider.IsGoogle() && resp.StatusCode == http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		if google.IsAuthError(body) {
+			cancel()
+			u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, ttft.Milliseconds(), true)
+			msg := fmt.Sprintf("upstream HTTP %d for model %q (invalid api key)", resp.StatusCode, u.ref.ModelSlug)
+			u.s.st.ProvHealth.SetError(keyID, msg)
+			u.s.st.MarkCooldown(keyID, 60*time.Second)
+			u.lastStatus = resp.StatusCode
+			u.lastBodySnippet = snippet(body, 300)
+			u.lastErr = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
+			u.lg.Warn("up<", "provider", u.ref.ProviderSlug, "key", ke.Name, "status", resp.StatusCode, "retry", true)
+			return attemptOutcome{kind: attemptUpstreamRetry, err: u.lastErr}
+		}
 	}
 
 	// 401/403/408: key bermasalah/transien -> coba key berikutnya
@@ -270,18 +293,17 @@ func (u *upstreamRun) attempt(ke *config.KeyEntry, keyID string) attemptOutcome 
 // serve meneruskan respons upstream ke client sambil mencatat usage/health.
 func (u *upstreamRun) serve(resp *http.Response, ke *config.KeyEntry, keyID string, ttft time.Duration, t0 time.Time) {
 	sse := u.stream || strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
-	if sse {
+	ok2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
+	cap := newCapture(4 << 20) // simpan ekor s/d 4MB untuk ekstrak usage
+	var n int64
+	if u.ref.Provider.IsGoogle() {
+		n = u.serveGoogle(resp, sse, ok2xx, cap)
+	} else if sse {
 		u.w.Header().Set("Content-Type", "text/event-stream")
 		u.w.Header().Set("Cache-Control", "no-cache")
 		u.w.Header().Set("Connection", "keep-alive")
 		u.w.Header().Set("X-Accel-Buffering", "no")
-	} else if ct := resp.Header.Get("Content-Type"); ct != "" {
-		u.w.Header().Set("Content-Type", ct)
-	}
-	u.w.WriteHeader(resp.StatusCode)
-	cap := newCapture(4 << 20) // simpan ekor s/d 4MB untuk ekstrak usage
-	var n int64
-	if sse {
+		u.w.WriteHeader(resp.StatusCode)
 		if fl, ok := u.w.(http.Flusher); ok {
 			fl.Flush()
 			n, _ = io.Copy(flushWriter{w: io.MultiWriter(u.w, cap), f: fl}, resp.Body)
@@ -292,12 +314,15 @@ func (u *upstreamRun) serve(resp *http.Response, ke *config.KeyEntry, keyID stri
 	} else {
 		// Non-SSE: buffer dulu dengan batas 8MB agar respons non-2xx
 		// diteruskan utuh; fallback antar-key sudah ditangani di attempt().
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			u.w.Header().Set("Content-Type", ct)
+		}
+		u.w.WriteHeader(resp.StatusCode)
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 		resp.Body.Close()
 		n, _ = io.Copy(io.MultiWriter(u.w, cap), bytes.NewReader(body))
 	}
 	el := time.Since(t0)
-	ok2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
 	u.s.st.Record(u.ref.ProviderSlug, u.ref.FullID, el.Milliseconds(), !ok2xx)
 	if ok2xx && u.s.st.Data != nil && u.callerHash != "" {
 		// AddUsage selalu dipanggil (walau toks==0) agar waktu terakhir request
@@ -317,4 +342,56 @@ func (u *upstreamRun) serve(resp *http.Response, ke *config.KeyEntry, keyID stri
 		u.s.noteUpstreamFailure(u.lg, u.ref, u.healthModelID, keyID, ke.Name, resp.StatusCode)
 	}
 	u.lg.Info("req<", "status", resp.StatusCode, "bytes", n, "latencyMs", el.Milliseconds(), "ttftMs", ttft.Milliseconds(), "key", ke.Name)
+}
+
+// serveGoogle menerjemahkan respons Interactions API ke bentuk [OI] lalu
+// menuliskannya ke client. Streaming diterjemahkan event-per-event; non-2xx
+// memakai envelope error [OI].
+func (u *upstreamRun) serveGoogle(resp *http.Response, sse, ok2xx bool, cap *capture) int64 {
+	upstreamSSE := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
+	if sse && ok2xx && upstreamSSE {
+		u.w.Header().Set("Content-Type", "text/event-stream")
+		u.w.Header().Set("Cache-Control", "no-cache")
+		u.w.Header().Set("Connection", "keep-alive")
+		u.w.Header().Set("X-Accel-Buffering", "no")
+		u.w.WriteHeader(resp.StatusCode)
+		var sink io.Writer = u.w
+		if fl, ok := u.w.(http.Flusher); ok {
+			sink = flushWriter{w: u.w, f: fl}
+		}
+		cw := &countWriter{w: io.MultiWriter(sink, cap)}
+		if err := google.TranslateStream(resp.Body, cw, u.inboundIface, u.publicModel); err != nil {
+			u.lg.Warn("google stream translation failed", "provider", u.ref.ProviderSlug, "err", err.Error())
+		}
+		resp.Body.Close()
+		return cw.n
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	resp.Body.Close()
+	if ok2xx {
+		if translated, err := google.TranslateResponse(body, u.inboundIface, u.publicModel); err == nil {
+			body = translated
+		} else {
+			u.lg.Warn("google response translation failed", "provider", u.ref.ProviderSlug, "err", err.Error())
+		}
+	} else {
+		body = google.TranslateError(body, resp.StatusCode)
+	}
+	u.w.Header().Set("Content-Type", "application/json")
+	u.w.WriteHeader(resp.StatusCode)
+	n, _ := io.Copy(io.MultiWriter(u.w, cap), bytes.NewReader(body))
+	return n
+}
+
+// countWriter menghitung byte yang benar-benar ditulis ke client.
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
